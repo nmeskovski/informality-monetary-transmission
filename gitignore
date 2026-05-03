@@ -1,0 +1,63 @@
+# =============================================================================
+# .gitignore — R / Quarto / renv replication repository
+# =============================================================================
+
+# ----- R session & history --------------------------------------------------
+.Rhistory
+.Rapp.history
+.Rdata
+.RData
+.Ruserdata
+*.Rproj.user/
+.Rproj.user
+
+# ----- Quarto ---------------------------------------------------------------
+# Rendered intermediate files & freeze cache
+/.quarto/
+**/.quarto/
+_freeze/
+**/_freeze/
+
+# Per-document cache & support directories created during rendering
+*_cache/
+*_files/
+
+# Tex auxiliaries from the LaTeX build
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# ----- renv -----------------------------------------------------------------
+# The library itself is reproduced from renv.lock; do NOT commit it.
+replication/renv/library/
+replication/renv/local/
+replication/renv/cellar/
+replication/renv/lock/
+replication/renv/python/
+replication/renv/staging/
+
+# Keep these (they are needed to bootstrap renv)
+!replication/renv/activate.R
+!replication/renv/settings.json
+!replication/renv.lock
+
+# ----- OS / editor cruft ----------------------------------------------------
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+*~
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# ----- Misc -----------------------------------------------------------------
+*.pyc
+__pycache__/
+*.bak
+*.tmp

@@ -1,0 +1,192 @@
+Indicator: 	Economic growth: the rate of change of real GDP
+
+Measure: 	percent
+
+Source: 	The World Bank
+
+Currencies: 	
+
+Definition: 	Gross domestic product is the total income earned through the production of goods and services in an economic territory during an accounting period. It can be measured in three different ways: using either the expenditure approach, the income approach, or the production approach. This indicator denotes the percentage change over each previous year of the constant price (base year 2015) series in United States dollars.
+
+------------------------------------------
+
+Indicator: 	Inflation: percent change in the Consumer Price Index
+
+Measure: 	percent
+
+Source: 	The World Bank
+
+Currencies: 	
+
+Definition: 	Inflation as measured by the consumer price index reflects the annual percentage change in the cost to the average consumer of acquiring a basket of goods and services that may be fixed or changed at specified intervals, such as yearly. This indicator denotes the percentage change over each previous year of the constant price (base year 2015) series in United States dollars.
+
+------------------------------------------
+
+Indicator: 	Regulatory quality index (-2.5 weak; 2.5 strong)
+
+Measure: 	points
+
+Source: 	The World Bank
+
+Currencies: 	
+
+Definition: 	The index of Regulatory Quality captures perceptions of the ability of the government to formulate and implement sound policies and regulations that permit and promote private sector development. 
+
+------------------------------------------
+
+Indicator: 	Political rights index, 7 (weak) - 1 (strong)
+
+Measure: 	points
+
+Source: 	The Freedom House
+
+Currencies: 	
+
+Definition: 	The Political Rights ratings from the Freedom House evaluate three categories: electoral process, political pluralism and participation, and the functioning of government. The index ranges from 1 (strong rights) to 7 (weak rights).
+
+------------------------------------------
+
+Indicator: 	Tax rate, percent of commercial profits
+
+Measure: 	percent
+
+Source: 	The World Bank (doing business survey)
+
+Currencies: 	
+
+Definition: 	Total tax rate measures the amount of taxes and mandatory contributions payable by businesses after accounting for allowable deductions and exemptions as a share of commercial profits. Taxes withheld (such as personal income tax) or collected and remitted to tax authorities (such as value added taxes, sales taxes or goods and service taxes) are excluded.
+
+------------------------------------------
+
+Indicator: 	Real interest rate: Bank lending rate minus inflation
+
+Measure: 	percent
+
+Source: 	The International Monetary Fund
+
+Currencies: 	
+
+Definition: 	
+
+------------------------------------------
+
+Indicator: 	Household consumption as percent of GDP
+
+Measure: 	percent
+
+Source: 	The World Bank
+
+Currencies: 	
+
+Definition: 	Household final consumption expenditure (formerly private consumption) is the market value of all goods and services, including durable products (such as cars, washing machines, and home computers), purchased by households. It excludes purchases of dwellings but includes imputed rent for owner-occupied dwellings. It also includes payments and fees to governments to obtain permits and licenses. Here, household consumption expenditure includes the expenditures of nonprofit institutions serving households, even when reported separately by the country. This item also includes any statistical discrepancy in the use of resources relative to the supply of resources.
+
+------------------------------------------
+
+Indicator: 	GDP per capita, current U.S. dollars
+
+Measure: 	U.S. dollars
+
+Source: 	The World Bank
+
+Currencies: 	
+
+Definition: 	Gross domestic product is the total income earned through the production of goods and services in an economic territory during an accounting period. It can be measured in three different ways: using either the expenditure approach, the income approach, or the production approach. The core indicator has been divided by the general population to achieve a per capita estimate.This indicator is expressed in current prices, meaning no adjustment has been made to account for price changes over time. This indicator is expressed in United States dollars.
+
+------------------------------------------
+
+Indicator: 	Bank lending-deposit interest rate spread 
+
+Measure: 	interest rate points
+
+Source: 	The International Monetary Fund
+
+Currencies: 	
+
+Definition: 	Difference between the lending rate and the deposit rate. The lending rate is the rate charged by banks on loans to the private sector and the deposit interest rate is the rate offered by commercial banks on three-month deposits.
+
+------------------------------------------
+
+Indicator: 	Domestic credit to the private sector, percent of GDP
+
+Measure: 	percent
+
+Source: 	The World Bank
+
+Currencies: 	
+
+Definition: 	Domestic credit to private sector refers to financial resources provided to the private sector, such as through loans, purchases of nonequity securities, and trade credits and other accounts receivable, that establish a claim for repayment. For some countries these claims include credit to public enterprises.
+
+------------------------------------------
+
+Indicator: 	Voice and accountability index (-2.5 weak; 2.5 strong)
+
+Measure: 	points
+
+Source: 	The World Bank
+
+Currencies: 	
+
+Definition: 	The index for Voice and Accountability captures perceptions of the extent to which the citizens are able to participate in selecting their government, as well as freedom of expression, freedom of association, and a free media.
+
+------------------------------------------
+
+Indicator: 	Control of corruption (-2.5 weak; 2.5 strong)
+
+Measure: 	points
+
+Source: 	The World Bank
+
+Currencies: 	
+
+Definition: 	The index for Control of Corruption captures perceptions of the extent to which public power is exercised for private gain, including both petty and grand forms of corruption, as well as capture of the state by elites and private interests.
+
+------------------------------------------
+
+Indicator: 	Shadow economy, percent of GDP
+
+Measure: 	percent
+
+Source: 	Medina and Schneider (2018)
+
+Currencies: 	
+
+Definition: 	The shadow economy as percent of total annual GDP. Detailed methodology of the estimations can be obtained from the following International Monetary Fund working paper by Leandro Medina and Friedrich Schneider (2018): Shadow Economies Around the World: What Did We Learn Over the Last 20 Years? The series are discontinued but can still serve as a benchmark in calibration exercises.
+
+------------------------------------------
+
+Indicator: 	Political stability index (-2.5 weak; 2.5 strong)
+
+Measure: 	points
+
+Source: 	The World Bank
+
+Currencies: 	
+
+Definition: 	The index of Political Stability and Absence of Violence/Terrorism measures perceptions of the likelihood that the government will be destabilized or overthrown by unconstitutional or violent means, including politically-motivated violence and terrorism. The index is an average of several other indexes from the Economist Intelligence Unit, the World Economic Forum, and the Political Risk Services, among others.
+
+------------------------------------------
+
+Indicator: 	Informal economy, MIMIC method
+
+Measure: 	percent
+
+Source: 	Informal economy database
+
+Currencies: 	
+
+Definition: 	The MIMIC model of the World Bank uses the following variables as determinants of the informal economy: 1) size of government, 2) share of direct taxation, 3) fiscal freedom index, 4) business freedom index, 5) unemployment rate and GDP per capita, and 6) government effectiveness. It proposes that the following variables are affected by the informal economy: 1) growth rate of GDP per capita, 2) the labor force participation rate, and 3) currency as a ratio of M0. These variables are used in a Structural Equation Model (SEM) with a latent variable that is a measure of the size of the informal economy. See, for example, Schneider, Buehn, and Montenegro (International Economic Journal, 2010). 
+
+------------------------------------------
+
+Indicator: 	Informal employment, percent of total employment
+
+Measure: 	percent
+
+Source: 	International Labour Organization 
+
+Currencies: 	
+
+Definition: 	Informal employment as percent of total employment. Derived from national surveys conducted by the International Labour Organization. 
+
+------------------------------------------
+

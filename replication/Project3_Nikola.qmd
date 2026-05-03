@@ -1,0 +1,3463 @@
+---
+title: "Project 3 - Nikola"
+author:
+  - name: "Nikola Meshkovski"
+
+institute: Corvinus University of Budapest
+date: 2026-02-26
+
+format:
+  pdf:
+    latex-engine: xelatex
+
+fontsize: 12pt
+mainfont: "Times New Roman"
+number-sections: true
+
+execute:
+  eval: true          # Evaluate code chunks
+  include: true       # Include both code and results in output
+  echo: true          # Show source code in output
+  output: true        # Show results of code execution
+  warning: false      # Suppress warnings
+  message: false      # Suppress messages
+  cache: true         # Chunk caching (set to true for faster rebuilds)
+
+knitr:
+  opts_chunk:
+    fig.path: "figs/" # Folder where all figures will be saved
+---
+
+```{r}
+#| label: Clean Enviroment
+
+# Clean Environment
+rm(list=ls())
+
+```
+
+```{r}
+#| label: Packages
+
+# Load packages
+packages <- c(
+  "readxl",      # Read Excel files (.xls, .xlsx)
+  "tidyverse",   # Data manipulation and visualisation (ggplot2, dplyr, etc.)
+  "cluster",     # Clustering algorithms (k-means, hierarchical, etc.)
+  "factoextra",  # Visualise clustering and PCA results
+  "here",        # Builds paths relative to the project root (.qmd location)
+  "renv",
+  "plm",
+  "tseries",
+  "writexl",
+  "sf",
+  "rnaturalearth",
+  "rnaturalearthdata",
+  "countrycode",
+  "fixest"
+)
+
+for (pkg in packages) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg)
+    library(pkg, character.only = TRUE)
+  }
+}
+
+## Done already
+# renv::init() is only run once when setting up the project for the first time. 
+# After that, renv::snapshot() is what we use to record any new packages into renv.lock.
+
+# Set global ggplot2 theme: Times New Roman font for all figures
+theme_set(theme_minimal(base_size = 12, base_family = "serif"))
+theme_update(text = element_text(family = "serif"))
+
+```
+
+```{r}
+#| label: Set Working Directory & Data Loading
+
+# Load data — paths relative to materials/
+df_main <- read_excel(here("data", "data_raw_theglobaleconomy.xlsx"))
+df_monetary_policy <- read_excel(here("data", "data_raw_monetary-transmission.xlsx"), 
+                                  sheet = "data_CWY_annual")
+
+# Load real GDP per capita (constant 2015 US$) from World Bank
+# skip=3 bypasses the 3 metadata rows; row 4 in the file is the true header
+df_gdp_real <- read_excel(here("data", "Real_GDP_pc_WorldBank.xls"), skip = 3) |>
+  select(`Country Name`, `1960`:`2025`) |>             # keep country + all year cols
+  pivot_longer(
+    cols      = -`Country Name`,
+    names_to  = "Year",
+    values_to = "GDP_pc_real"
+  ) |>
+  mutate(Year = as.integer(Year)) |>
+  rename(Country = `Country Name`)
+
+```
+
+
+```{r}
+#| label: Merging Datasets
+
+# Keep only MPS from the monetary policy dataset
+mps_subset <- df_monetary_policy[, c("Country", "Year", "MPS")]
+
+# Merge MPS into the main dataset
+df_world <- merge(
+  df_main,
+  mps_subset,
+  by     = c("Country", "Year"),
+  all.x  = TRUE
+)
+
+# Drop the nominal GDP per capita column and replace with real GDP per capita
+df_world <- df_world |>
+  select(-`GDP per capita, current U.S. dollars`) |>   # ← remove nominal variable
+  merge(
+    df_gdp_real,
+    by     = c("Country", "Year"),
+    all.x  = TRUE
+  )
+
+# Sort by Country and Year for readability
+df_world <- df_world[order(df_world$Country, df_world$Year), ]
+
+# Clean up
+rm(df_main, df_monetary_policy, mps_subset, df_gdp_real)
+
+```
+
+
+```{r}
+#| label: Choosing initial time intervals
+
+# Most likely time range for availiable data: 2000–2019 (Annual)
+# Isolates the COVID pandemic which would be an outlier, and Monetary Policy Transmission only has data until 2019
+df_world_2000_2019 <- df_world %>%
+  filter(Year >= 2000, Year <= 2019)
+
+# Also filter df_world to be after 2000, data from 1990 is too broad
+df_world <- df_world %>%
+  filter(Year >= 2000, Year <= 2026)
+
+```
+
+
+```{r}
+#| label: Initial missingness table
+
+
+# Create a table with missing observations for each variable
+missing_table <- data.frame(
+  Missing_Obs = sapply(df_world_2000_2019, function(x) sum(is.na(x))),
+  Total_Obs = nrow(df_world_2000_2019)
+)
+
+# Calculate the percentage of missingness for each variable
+missing_table$Missing_Percent <- round(
+  (missing_table$Missing_Obs / missing_table$Total_Obs) * 100, 2
+)
+
+# Sort the table from highest to lowest missingness percentage
+missing_table <- missing_table[order(-missing_table$Missing_Percent), ]
+
+# View the result
+missing_table
+
+```
+
+```{r}
+#| label: Development status segmentation by standard World Bank/IMF threshold
+
+
+# Create a categorical variable based on GDP per capita ()
+# Countries with GDP per capita above 14,000 are labeled "Developed"
+# Countries with GDP per capita below 14,000 are labeled "EMDEs (Emerging market and developing economies)"
+# Missing GDP per capita values stay as NA
+
+# Compute each country's average GDP per capita over the full 2000-2019 window
+avg_gdp <- df_world_2000_2019 %>%
+  group_by(Country) %>%
+  summarise(avg_gdp_pc = mean(`GDP_pc_real`, na.rm = TRUE))
+
+# Apply the $14,000 threshold once — produces a single fixed label per country
+avg_gdp$DevelopmentStatus <- ifelse(
+  is.na(avg_gdp$avg_gdp_pc), NA,
+  ifelse(avg_gdp$avg_gdp_pc > 14000, "Developed", "Emerging")
+)
+
+# Binary version: 1 = Developed, 0 = Emerging
+avg_gdp$DevelopmentStatus_binary <- ifelse(
+  is.na(avg_gdp$avg_gdp_pc), NA,
+  ifelse(avg_gdp$avg_gdp_pc > 14000, 1, 0)
+)
+
+# Merge the fixed classification back — every row for a country gets the same label
+df_world_2000_2019 <- df_world_2000_2019 %>%
+  left_join(avg_gdp[, c("Country", "DevelopmentStatus", "DevelopmentStatus_binary")],
+            by = "Country")
+
+# Clean up helper table
+rm(avg_gdp)
+
+```
+
+```{r}
+#| label: Missingness table by development status part 1
+
+
+# Split the dataset into Emerging and Developed groups
+df_emerging <- subset(df_world_2000_2019, DevelopmentStatus == "Emerging")
+df_developed <- subset(df_world_2000_2019, DevelopmentStatus == "Developed")
+
+# Create a missingness table for the Emerging group
+missing_emerging <- data.frame(
+  Variable = names(df_emerging),
+  Missing_Obs = sapply(df_emerging, function(x) sum(is.na(x))),
+  Total_Obs = nrow(df_emerging)
+)
+
+# Calculate the percentage of missingness for the Emerging group
+missing_emerging$Missing_Percent <- round(
+  (missing_emerging$Missing_Obs / missing_emerging$Total_Obs) * 100, 2
+)
+
+# Sort the Emerging table by missingness percentage
+missing_emerging <- missing_emerging[order(-missing_emerging$Missing_Percent), ]
+
+# Create a missingness table for the Developed group
+missing_developed <- data.frame(
+  Variable = names(df_developed),
+  Missing_Obs = sapply(df_developed, function(x) sum(is.na(x))),
+  Total_Obs = nrow(df_developed)
+)
+
+# Calculate the percentage of missingness for the Developed group
+missing_developed$Missing_Percent <- round(
+  (missing_developed$Missing_Obs / missing_developed$Total_Obs) * 100, 2
+)
+
+# Sort the Developed table by missingness percentage
+missing_developed <- missing_developed[order(-missing_developed$Missing_Percent), ]
+
+# View both tables (missingness by segment)
+missing_emerging
+missing_developed
+
+# Export tables using relative paths anchored to materials/
+write_xlsx(missing_emerging, here("tables", "descriptive_tables", "missing_emerging.xlsx"))
+write_xlsx(missing_developed, here("tables", "descriptive_tables", "missing_developed.xlsx"))
+
+
+
+```
+
+
+```{r}
+#| label: Missingness table by development status part 2
+
+
+# Create missingness summary for the Emerging group
+missing_emerging <- data.frame(
+  Variable = names(df_emerging),
+  Emerging_Missing_Obs = sapply(df_emerging, function(x) sum(is.na(x))),
+  Emerging_Total_Obs = nrow(df_emerging)
+)
+
+# Calculate percentage missingness for the Emerging group
+missing_emerging$Emerging_Missing_Percent <- round(
+  (missing_emerging$Emerging_Missing_Obs / missing_emerging$Emerging_Total_Obs) * 100, 2
+)
+
+# Create missingness summary for the Developed group
+missing_developed <- data.frame(
+  Variable = names(df_developed),
+  Developed_Missing_Obs = sapply(df_developed, function(x) sum(is.na(x))),
+  Developed_Total_Obs = nrow(df_developed)
+)
+
+# Calculate percentage missingness for the Developed group
+missing_developed$Developed_Missing_Percent <- round(
+  (missing_developed$Developed_Missing_Obs / missing_developed$Developed_Total_Obs) * 100, 2
+)
+
+# Keep only the key comparison columns from each table
+missing_emerging <- missing_emerging[, c("Variable", "Emerging_Missing_Obs", "Emerging_Missing_Percent")]
+missing_developed <- missing_developed[, c("Variable", "Developed_Missing_Obs", "Developed_Missing_Percent")]
+
+# Merge the two tables by variable name
+missing_comparison <- merge(missing_emerging, missing_developed, by = "Variable", all = TRUE)
+
+# Sort the combined table by Emerging missingness percentage, highest first
+missing_comparison <- missing_comparison[order(-missing_comparison$Emerging_Missing_Percent), ]
+
+# View the combined comparison table
+missing_comparison
+
+```
+
+
+```{r}
+#| label: Descriptive statistics by development status
+
+
+# See data types within data frame
+str(df_world_2000_2019)
+
+# Keep only numeric variables for descriptive statistics
+# This avoids trying to summarize text variables such as Country or DevelopmentStatus
+numeric_emerging <- df_emerging[, sapply(df_emerging, is.numeric)]
+numeric_developed <- df_developed[, sapply(df_developed, is.numeric)]
+
+# Create descriptive statistics table for Emerging countries
+# We calculate the number of non-missing observations, mean, standard deviation,
+# minimum, median, and maximum for each numeric variable
+desc_emerging <- data.frame(
+  N = sapply(numeric_emerging, function(x) sum(!is.na(x))),
+  Mean = sapply(numeric_emerging, function(x) mean(x, na.rm = TRUE)),
+  SD = sapply(numeric_emerging, function(x) sd(x, na.rm = TRUE)),
+  Min = sapply(numeric_emerging, function(x) min(x, na.rm = TRUE)),
+  Median = sapply(numeric_emerging, function(x) median(x, na.rm = TRUE)),
+  Max = sapply(numeric_emerging, function(x) max(x, na.rm = TRUE))
+)
+
+# Round the numeric results for a cleaner table
+desc_emerging[, -c(1, 2)] <- round(desc_emerging[, -c(1, 2)], 2)
+
+# Create descriptive statistics table for Developed countries
+desc_developed <- data.frame(
+  N = sapply(numeric_developed, function(x) sum(!is.na(x))),
+  Mean = sapply(numeric_developed, function(x) mean(x, na.rm = TRUE)),
+  SD = sapply(numeric_developed, function(x) sd(x, na.rm = TRUE)),
+  Min = sapply(numeric_developed, function(x) min(x, na.rm = TRUE)),
+  Median = sapply(numeric_developed, function(x) median(x, na.rm = TRUE)),
+  Max = sapply(numeric_developed, function(x) max(x, na.rm = TRUE))
+)
+
+# Round the numeric results for a cleaner table
+desc_developed[, -c(1, 2)] <- round(desc_developed[, -c(1, 2)], 2)
+
+# View the two tables
+desc_emerging
+desc_developed
+
+# Export tables using relative paths anchored to materials/
+write_xlsx(desc_emerging, here("tables", "descriptive_tables", "desc_emerging.xlsx"))
+write_xlsx(desc_developed, here("tables", "descriptive_tables", "desc_developed.xlsx"))
+
+```
+
+
+```{r}
+#| label: Variable Selection
+
+# --- DROP: Informal employment (~87% missing — unusable) ---
+# --- DROP: Shadow economy (keep MIMIC version only — see below) ---
+# --- NOTE: Bank lending-deposit spread (~44% missing) and real interest rate (~35% missing)
+#           are excluded from the main specification due to high missingness, but are not dropped (might be used later).
+#           This will be discussed in the data section of the paper. ---
+
+
+# Keep only the variables needed for the analysis
+df_world_2000_2019 <- df_world_2000_2019 %>%
+  select(
+    -'Shadow economy, percent of GDP',
+    -'Informal employment, percent of total employment'
+    )
+
+```
+
+```{r}
+#| label: Clean Up Environment
+
+rm(
+  desc_developed,
+  desc_emerging, 
+  missing_comparison, 
+  missing_developed, 
+  missing_emerging, 
+  missing_table, 
+  numeric_developed, 
+  numeric_emerging,
+  packages,
+  pkg,
+  df_world,
+  df_developed,
+  df_emerging
+  )
+
+```
+
+```{r}
+#| label: Renaming Variables
+
+# Rename all variables to short, code-friendly names
+df_world_2000_2019 <- df_world_2000_2019 %>%
+  rename(
+    # --- Identifiers ---
+    country = Country,
+    year = Year,
+    code = Code,
+    continent_code = ContinentCode,
+
+    # --- Classification ---
+    dev_status = DevelopmentStatus,
+    dev_binary = DevelopmentStatus_binary,
+
+    # --- Key variable ---
+    mps = MPS,                                                                  # Monetary Policy Sensitivity
+
+    # --- Shadow economy ---
+    mimic = `Informal economy, MIMIC method`,                                   # Shadow economy — MIMIC method
+
+    # --- Macroeconomic variables ---
+    gdp_pc = `GDP_pc_real`,                                                     # Real GDP per capita (constant 2015 US$)
+    gdp_growth = `Economic growth: the rate of change of real GDP`,             # Real GDP growth rate (annual %)
+    infl = `Inflation: percent change in the Consumer Price Index`,             # CPI inflation (annual %)
+    credit_gdp = `Domestic credit to the private sector, percent of GDP`,       # Domestic credit to private sector (% of GDP)
+    hh_consumption = `Household consumption as percent of GDP`,                 # Household consumption (% of GDP)
+    tax_rate = `Tax rate, percent of commercial profits`,                       # Tax rate (% of commercial profits)
+
+    # --- Governance ---
+    reg_quality = `Regulatory quality index (-2.5 weak; 2.5 strong)`,           # Regulatory quality (WGI)
+    corruption = `Control of corruption (-2.5 weak; 2.5 strong)`,               # Control of corruption (WGI)
+    pol_stability = `Political stability index (-2.5 weak; 2.5 strong)`,        # Political stability (WGI)
+    voice_acc = `Voice and accountability index (-2.5 weak; 2.5 strong)`,       # Voice and accountability (WGI)
+    pol_rights = `Political rights index, 7 (weak) - 1 (strong)`,               # Political rights index (Freedom House)
+
+    # --- Excluded from main spec — high missingness, retained for robustness ---
+    spread = `Bank lending-deposit interest rate spread`,                       # Lending-deposit spread (~44% missing)
+    real_int_rate = `Real interest rate: Bank lending rate minus inflation`     # Real interest rate (~35% missing)
+  )
+
+```
+
+```{r}
+#| label: Diagnostics 1.0 Panel Unit Root Tests
+#| output: true
+#| warning: false
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DIAGNOSTIC 1 — PANEL UNIT ROOT TESTS (Country-by-Country ADF approach)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# PURPOSE:
+# We need to know whether each variable is stationary (i.e., mean-reverting)
+# or has a unit root (i.e., trends/wanders without returning to a stable mean).
+# This matters because:
+#   - If a variable is stationary → safe to use in levels in the LP regression.
+#   - If a variable has a unit root → we should use it in first differences
+#     or cumulative changes, otherwise regressions may be spurious.
+
+# WHY NOT plm::purtest (IPS)?
+# The Im-Pesaran-Shin test implemented in plm::purtest is fragile with
+# unbalanced panels. With T=20 and gaps in coverage, AIC lag selection can
+# consume too many degrees of freedom, producing NaN. Rather than fighting
+# the package, we run individual ADF tests per country using tseries::adf.test
+# and summarise across countries — this is essentially what IPS does under
+# the hood (averaging country-level ADF statistics).
+
+# THE ADF TEST:
+#   H0: The series has a unit root (non-stationary)
+#   H1: The series is stationary
+#   Low p-value (< 0.05) → reject H0 → evidence of stationarity
+
+# HOW TO INTERPRET THE SUMMARY TABLE:
+#   - n_countries: how many countries had enough data to run the test
+#   - mean_pval / median_pval: average p-values across countries
+#     (lower = stronger overall evidence of stationarity)
+#   - pct_rejected_5: percentage of countries where H0 was rejected at 5%
+#     * > 70% rejected → variable is broadly stationary across the panel
+#     * 30–70% rejected → mixed evidence, proceed with caution
+#     * < 30% rejected → likely non-stationary, consider differencing
+
+# NOTE: We require at least 15 non-missing observations per country.
+# The ADF test needs enough data points to estimate an autoregression
+# with lags — with T=20, requiring 15 usable obs is a reasonable floor.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+# Variables to test: all key variables that will enter the LP regressions
+# MPS is excluded — it is a shock series centered on zero by construction,
+# so it is stationary by design and does not need testing.
+vars_urt <- c("infl", "gdp_pc", "gdp_growth", "mimic", "credit_gdp",
+              "reg_quality", "corruption", "pol_stability")
+
+min_obs <- 15  # Minimum usable observations per country
+
+results <- list()
+
+for (v in vars_urt) {
+
+  # Step 1: For each country, check if there are enough non-missing observations
+  #         to run an ADF test. If yes, run adf.test and extract the p-value.
+  #         If the test fails (e.g., constant series), return NA.
+  country_pvals <- df_world_2000_2019 %>%
+    group_by(country) %>%
+    filter(sum(!is.na(.data[[v]])) >= min_obs) %>%
+    summarise(
+      adf_pval = tryCatch({
+        adf.test(na.omit(.data[[v]]))$p.value
+      }, error = function(e) NA_real_),
+      .groups = "drop"
+    ) %>%
+    filter(!is.na(adf_pval))
+
+  # Step 2: Summarise across all countries that were successfully tested
+  results[[v]] <- data.frame(
+    variable       = v,
+    n_countries    = nrow(country_pvals),
+    mean_pval      = round(mean(country_pvals$adf_pval), 3),
+    median_pval    = round(median(country_pvals$adf_pval), 3),
+    pct_rejected_5 = round(mean(country_pvals$adf_pval < 0.05) * 100, 1)
+  )
+}
+
+# Combine into a single summary table and display
+urt_summary <- bind_rows(results)
+
+cat("══════════════════════════════════════════════════════════════════\n")
+cat("  PANEL UNIT ROOT TEST SUMMARY (Country-by-Country ADF)\n")
+cat("──────────────────────────────────────────────────────────────────\n")
+cat("  H0: unit root (non-stationary) | Reject at 5% → stationary\n")
+cat("  min_obs per country:", min_obs, "\n")
+cat("══════════════════════════════════════════════════════════════════\n\n")
+print(urt_summary, row.names = FALSE)
+
+cat("\n── Interpretation guide ──\n")
+cat("  pct_rejected_5 > 70%  → broadly stationary, safe to use in levels\n")
+cat("  pct_rejected_5 30-70% → mixed, inspect further or consider differencing\n")
+cat("  pct_rejected_5 < 30%  → likely non-stationary, use in differences\n")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INTERPRETATION OF RESULTS
+# ══════════════════════════════════════════════════════════════════════════════
+# NOTE (unit root tests — revisit when writing paper):
+
+# ADF results are uninformative here — expected with T≈20 (15–17 usable obs after lags).
+# Low power means the test can't distinguish stationary from unit root.
+# IPS would fix this but failed on unbalanced panel, so we're stuck with the power problem.
+
+# Variables are safe in levels for the following reasons:
+#   - inflation, GDP growth: growth rates, economically bounded
+#   - reg_quality, corruption, pol_stability: bounded indices [-2.5, 2.5], unit root logically impossible
+#   - credit_gdp: could be trending (financial deepening) — consider mentioning in paper
+#   - MIMIC: high persistence (~3.8% rejection) is expected — informality is a slow-moving
+#             structural characteristic, not a unit root problem; variation is mostly cross-country
+
+# In paper: note T=20 limits formal IPS tests; justify stationarity via economic reasoning instead.
+# ══════════════════════════════════════════════════════════════════════════════
+
+```
+
+
+```{r}
+#| label: Diagnostics 2.0 Persistence Check on MIMIC (AR(1))
+#| output: true
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DIAGNOSTIC 2 — PERSISTENCE CHECK ON MIMIC (AR(1) Autocorrelation)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# PURPOSE:
+# Before using lagged MIMIC in the LP regression, we check how persistent
+# it is. If MIMIC barely changes year-to-year (high AR(1)), then the lag
+# is a reliable proxy for the current structural level of informality.
+
+# WHAT WE COMPUTE:
+#   Part A: Per-country AR(1) — correlation between MIMIC_t and MIMIC_{t-1}
+#           within each country, then summarise across countries.
+#   Part B: Pooled AR(1) regression — regress MIMIC_t on MIMIC_{t-1} across
+#           the full panel.
+
+# HOW TO INTERPRET:
+#   AR(1) > 0.95 → extremely persistent; lagging is safe, but most variation
+#                   is cross-country (confirmed by Diagnostic 3)
+#   AR(1) 0.80–0.95 → highly persistent; lagging well-justified
+#   AR(1) < 0.70 → moderate persistence; lagging may lose information
+
+# IMPORTANT: We use dplyr::lag() explicitly throughout. Loading the tseries
+# package can cause stats::lag to mask dplyr::lag — stats::lag does NOT
+# shift values, it only changes a time-series attribute, producing incorrect
+# results (a perfect AR(1) = 1 with zero residuals).
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Part A: Per-country AR(1) coefficient ──
+
+ar1_country <- df_world_2000_2019 %>%
+  arrange(country, year) %>%
+  group_by(country) %>%
+  mutate(mimic_t_minus1 = dplyr::lag(mimic, 1)) %>%
+  filter(sum(!is.na(mimic) & !is.na(mimic_t_minus1)) >= 5) %>%
+  summarise(
+    n_pairs = sum(!is.na(mimic) & !is.na(mimic_t_minus1)),
+    ar1 = cor(mimic, mimic_t_minus1, use = "complete.obs"),
+    .groups = "drop"
+  )
+
+cat("══════════════════════════════════════════════════════════════════\n")
+cat("  MIMIC AR(1) — Per-Country Summary\n")
+cat("──────────────────────────────────────────────────────────────────\n")
+cat("  Countries with enough data:", nrow(ar1_country), "\n")
+cat("══════════════════════════════════════════════════════════════════\n\n")
+print(summary(ar1_country$ar1))
+
+# ── Part B: Pooled AR(1) regression ──
+
+mimic_ar <- df_world_2000_2019 %>%
+  arrange(country, year) %>%
+  group_by(country) %>%
+  mutate(mimic_t_minus1 = dplyr::lag(mimic, 1)) %>%
+  ungroup() %>%
+  filter(!is.na(mimic), !is.na(mimic_t_minus1))
+
+cat("\n══════════════════════════════════════════════════════════════════\n")
+cat("  MIMIC AR(1) — Pooled OLS Regression (mimic ~ mimic_t_minus1)\n")
+cat("──────────────────────────────────────────────────────────────────\n")
+cat("  Coefficient on mimic_t_minus1 close to 1 → high persistence\n")
+cat("  N observations:", nrow(mimic_ar), "\n")
+cat("══════════════════════════════════════════════════════════════════\n\n")
+print(summary(lm(mimic ~ mimic_t_minus1, data = mimic_ar)))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INTERPRETATION OF RESULTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Per-country AR(1): median = 0.91, mean = 0.87, 75th percentile = 0.95
+# Pooled OLS: coefficient on mimic_t_minus1 = 0.994, R² = 0.998
+
+# MIMIC is extremely persistent but NOT time-invariant. It moves slowly within
+# countries (within-country SD ≈ 1 on a scale of 15–58, typical range ≈ 3.5
+# points over 20 years). This is consistent with informality being a deep
+# structural characteristic that evolves gradually.
+
+# Implications for the LP specification:
+
+#   1. LAGGING IS WELL-JUSTIFIED. With AR(1) ≈ 0.91–0.99, last year's MIMIC
+#      is an excellent proxy for current informality. The lag also provides
+#      the econometric benefit of pre-determination — it avoids the concern
+#      that a monetary shock at time t could contemporaneously affect
+#      informality at time t.
+
+#   2. STANDALONE MIMIC CAN enter the LP equation alongside country FE,
+#      because MIMIC is not perfectly collinear with the fixed effects.
+#      However, country FE will absorb the vast majority of MIMIC's variation
+#      (Diagnostic 3 will quantify the between vs. within share). The
+#      standalone coefficient will be identified only off the small within-
+#      country movements and may be imprecise. This is fine — the coefficient
+#      of interest is δ_h on the interaction MPS × MIMIC, not γ_h on MIMIC
+#      itself.
+
+#   3. INTERACTION TERM MPS × MIMIC remains the core identification strategy.
+#      It is well-identified because MPS varies substantially over time,
+#      and the cross-country spread in MIMIC levels provides the moderating
+#      variation. Even if country FE absorb most of the MIMIC level, the
+#      interaction exploits the fact that the same MPS shock hits countries
+#      with very different informality levels.
+
+#   4. NAMESPACE WARNING: dplyr::lag() must be used explicitly throughout the
+#      project. The tseries package causes stats::lag to mask dplyr::lag —
+#      stats::lag does not shift values, producing silently wrong results.
+# ══════════════════════════════════════════════════════════════════════════════
+
+```
+
+
+```{r}
+#| label: Diagnostics 2.1 MIMIC Within-Country Variation Check
+
+# Check: does MIMIC actually vary within any country?
+mimic_check <- df_world_2000_2019 %>%
+  group_by(country) %>%
+  summarise(
+    n_obs = sum(!is.na(mimic)),
+    sd_within = sd(mimic, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(n_obs >= 2)
+
+cat("Countries with ANY within-country MIMIC variation:", 
+    sum(mimic_check$sd_within > 0.001, na.rm = TRUE), 
+    "out of", nrow(mimic_check), "\n")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INTERPRETATION OF RESULTS
+# ══════════════════════════════════════════════════════════════════════════════
+# All 158 countries with ≥2 observations show within-country MIMIC variation
+# (sd > 0.001). MIMIC is NOT time-invariant — the earlier AR(1) = 1.000 result
+# was caused by a namespace bug (stats::lag masking dplyr::lag), not by the data.
+# After fixing with dplyr::lag(), AR(1) ≈ 0.91 (median), confirming genuine but
+# slow-moving within-country variation.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+```
+
+
+```{r}
+#| label: Diagnostics 2.2 MIMIC Within-Country Movement Magnitude
+
+# How much does MIMIC actually move within countries?
+mimic_variation <- df_world_2000_2019 %>%
+  group_by(country) %>%
+  filter(sum(!is.na(mimic)) >= 5) %>%
+  summarise(
+    n_obs      = sum(!is.na(mimic)),
+    mean_mimic = round(mean(mimic, na.rm = TRUE), 3),
+    sd_within  = round(sd(mimic, na.rm = TRUE), 6),   # 6 decimals to catch tiny variation
+    min_mimic  = round(min(mimic, na.rm = TRUE), 3),
+    max_mimic  = round(max(mimic, na.rm = TRUE), 3),
+    range      = round(max(mimic, na.rm = TRUE) - min(mimic, na.rm = TRUE), 6),
+    .groups = "drop"
+  )
+
+cat("=== Within-country MIMIC variation summary ===\n\n")
+print(summary(mimic_variation$sd_within))
+cat("\n")
+print(summary(mimic_variation$range))
+
+# Show a few example countries to see the actual time series
+cat("\n=== Sample countries: MIMIC over time ===\n")
+examples <- df_world_2000_2019 %>%
+  filter(country %in% c("Germany", "Brazil", "India", "Nigeria", "Hungary")) %>%
+  select(country, year, mimic) %>%
+  filter(!is.na(mimic)) %>%
+  arrange(country, year)
+
+print(examples)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INTERPRETATION OF RESULTS
+# ══════════════════════════════════════════════════════════════════════════════
+# MIMIC genuinely varies but slowly: median within-country SD ≈ 1.1 (on a 15–58 scale),
+# median range ≈ 3.5 over 20 years. Smooth, slowly-evolving series within countries
+# (see Brazil, Hungary examples).
+
+# Combined with Diagnostic 2.0 (median AR(1) = 0.91, pooled coefficient = 0.994):
+#   - MIMIC is highly persistent but not constant
+#   - Lagging is well-justified — MIMIC_{t-1} is an excellent proxy for current informality
+#   - Most identification in MPS × MIMIC comes from cross-country variation in levels,
+#     not within-country changes (Diagnostic 3 will quantify this)
+# ══════════════════════════════════════════════════════════════════════════════
+
+```
+
+
+```{r}
+#| label: Diagnostics 2.3 Lag Function Namespace Verification
+
+# Check if the lag is actually shifting values
+test <- df_world_2000_2019 %>%
+  filter(country == "Brazil", !is.na(mimic)) %>%
+  arrange(year) %>%
+  mutate(
+    lag_dplyr = dplyr::lag(mimic, 1),   # Explicitly call dplyr version
+    lag_plain = lag(mimic, 1)            # Whatever is currently being called
+  ) %>%
+  select(country, year, mimic, lag_dplyr, lag_plain)
+
+print(head(test, 10))
+
+# BUGFIX: stats::lag() was silently overriding dplyr::lag() — lagged values were identical
+# to contemporaneous values (no shift occurring). Use dplyr::lag() explicitly everywhere.
+# This would have corrupted all lagged regressors in the LP regressions silently.
+
+``` 
+
+
+```{r}
+#| label: Diagnostics 3. Within vs. Between Variation Decomposition
+#| output: true
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DIAGNOSTIC 3 — WITHIN vs. BETWEEN VARIATION DECOMPOSITION
+# ══════════════════════════════════════════════════════════════════════════════
+
+# PURPOSE:
+# Panel data variation can be decomposed into two components:
+#   - BETWEEN variation: differences across countries (e.g., Nigeria's MIMIC
+#     is ~55, Germany's is ~15 — that gap is between variation)
+#   - WITHIN variation: changes over time within a country (e.g., Brazil's
+#     MIMIC moving from 39.8 to 36.2 over 2000–2013)
+
+# WHY THIS MATTERS FOR THE LP SPECIFICATION:
+# Country fixed effects absorb ALL between variation. So any regressor whose
+# variation is mostly between-country will have its coefficient identified
+# only from the small within-country movements. This is especially relevant
+# for MIMIC, which we know is highly persistent (Diagnostic 2).
+
+# For the interaction term MPS × MIMIC:
+#   - MPS varies mostly within-country (shocks happen over time)
+#   - MIMIC varies mostly between-country (structural characteristic)
+#   - The interaction is well-identified because MPS provides time variation
+#     and MIMIC provides cross-country moderation
+
+# HOW TO INTERPRET:
+#   Between_Pct close to 100% → variable is essentially a country characteristic;
+#     country FE will absorb it, standalone coefficient poorly identified
+#   Within_Pct close to 100% → variable moves mostly over time within countries;
+#     well-identified even with country FE
+#   Roughly balanced → both dimensions contribute to identification
+
+# NOTE: Between_Pct + Within_Pct should sum to approximately 100%.
+# Small deviations are due to the unbalanced panel (not all countries
+# have the same number of observations).
+# ══════════════════════════════════════════════════════════════════════════════
+
+vars_decomp <- c("mimic", "mps", "infl", "gdp_pc", "gdp_growth",
+                 "credit_gdp", "reg_quality", "corruption", "pol_stability")
+
+decomp <- lapply(vars_decomp, function(v) {
+  # Step 1: Compute each country's time-series mean (the "between" component)
+  means <- df_world_2000_2019 %>%
+    group_by(country) %>%
+    summarise(c_mean = mean(.data[[v]], na.rm = TRUE), .groups = "drop")
+
+  # Step 2: Compute within-country deviations from each country's mean
+  df_temp <- df_world_2000_2019 %>%
+    left_join(means, by = "country") %>%
+    mutate(within_dev = .data[[v]] - c_mean)
+
+  # Step 3: Compute variance components
+  total_var   <- var(df_world_2000_2019[[v]], na.rm = TRUE)
+  between_var <- var(means$c_mean, na.rm = TRUE)
+  within_var  <- var(df_temp$within_dev, na.rm = TRUE)
+
+  data.frame(
+    Variable    = v,
+    Between_Pct = round(between_var / total_var * 100, 1),
+    Within_Pct  = round(within_var  / total_var * 100, 1)
+  )
+})
+
+cat("══════════════════════════════════════════════════════════════════\n")
+cat("  WITHIN vs. BETWEEN VARIANCE DECOMPOSITION (%)\n")
+cat("──────────────────────────────────────────────────────────────────\n")
+cat("  Between = cross-country differences (absorbed by country FE)\n")
+cat("  Within  = over-time changes within a country (survives FE)\n")
+cat("══════════════════════════════════════════════════════════════════\n\n")
+print(do.call(rbind, decomp), row.names = FALSE)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INTERPRETATION OF RESULTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Results match expectations and strongly support the identification strategy:
+
+#   mimic:         99.6% between, 1.0% within — almost purely a country
+#                  characteristic. Country FE will absorb the level; standalone
+#                  MIMIC coefficient will be very poorly identified. Not a problem —
+#                  the coefficient of interest is on the interaction, not MIMIC itself.
+
+#   mps:           0.4% between, 99.6% within — pure time variation, as expected
+#                  for a shock series centered on zero by construction.
+
+#   infl:          29.3% between, 77.5% within — substantial within variation means
+#                  the dependent variable moves enough over time to be explained.
+
+#   gdp_pc:        91.5% between, 8.7% within — substantial cross country variation, 
+#                  to be taken as a log dependent variable or log control.
+
+#   gdp_growth:    16.5% between, 83.6% within — same as inflation; well-suited
+#                  as a dependent variable or control.
+
+#   credit_gdp:    88.5% between — mostly structural. Standalone coefficient weakly
+#                  identified with country FE, but still useful as a control for
+#                  cross-country financial depth differences.
+
+#   reg_quality:   95.6% between — almost entirely cross-country.
+#   corruption:    97.1% between — almost entirely cross-country.
+#   pol_stability: 91.2% between — almost entirely cross-country.
+#                  All three governance variables are 90%+ between. Including multiple
+#                  in the baseline wastes degrees of freedom — pick one, relegate
+#                  others to robustness (Diagnostic 4 correlation results will guide
+#                  which one to keep).
+
+# KEY TAKEAWAY FOR THE PAPER:
+# The interaction MPS × MIMIC combines a 99.6%-within variable (MPS) with a
+# 99.6%-between variable (MIMIC). The interaction inherits variation from both
+# dimensions — it differs across countries (because MIMIC levels differ) AND
+# over time (because MPS shocks arrive at different points). This makes the
+# interaction well-identified even with country and year fixed effects.
+# We state this explicitly in the methodology section.
+# ══════════════════════════════════════════════════════════════════════════════
+
+```
+
+
+```{r}
+#| label: Diagnostics 4. Multicollinearity Check
+#| output: true
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DIAGNOSTIC 4 — MULTICOLLINEARITY CHECK (Correlation Matrix)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# PURPOSE:
+# If two regressors are very highly correlated (|r| > 0.85), including both
+# in the same regression inflates standard errors and makes individual
+# coefficients unreliable. We check all candidate control variables plus
+# MIMIC to decide which controls to include in the baseline specification.
+
+# WHY MIMIC IS INCLUDED:
+# Informality is likely correlated with governance quality (countries with
+# larger informal economies tend to have weaker institutions). If the
+# correlation is very high, the interaction MPS × MIMIC could partly
+# capture MPS × governance rather than MPS × informality. This doesn't
+# invalidate the result, but it's important to understand and discuss.
+
+# HOW TO INTERPRET:
+#   |r| < 0.50  → no concern, include both freely
+#   |r| 0.50–0.70 → moderate correlation, fine in practice
+#   |r| 0.70–0.85 → notable, but usually acceptable; monitor SEs
+#   |r| > 0.85  → high multicollinearity risk; avoid both in same spec,
+#                  or pick one and use the other in robustness checks
+
+# ACTION ITEMS (fill in after reviewing results):
+#   - If reg_quality and corruption correlate > 0.85 → pick one for baseline
+#   - If mimic correlates highly with a governance variable → note in paper
+#     that the informality channel may partly proxy institutional quality
+# ══════════════════════════════════════════════════════════════════════════════
+
+controls_cor <- df_world_2000_2019 %>%
+  select(mimic, mps, credit_gdp, reg_quality, corruption, pol_stability,
+         voice_acc, gdp_growth, gdp_pc, infl)
+
+cor_matrix <- round(cor(controls_cor, use = "complete.obs"), 2)
+
+cat("══════════════════════════════════════════════════════════════════\n")
+cat("  CORRELATION MATRIX — MIMIC + Control Variables\n")
+cat("──────────────────────────────────────────────────────────────────\n")
+cat("  Flag pairs with |r| > 0.85 for multicollinearity concern\n")
+cat("══════════════════════════════════════════════════════════════════\n\n")
+print(cor_matrix)
+
+# Automatically flag high correlations (excluding diagonal)
+cat("\n── Pairs with |r| > 0.70 ──\n")
+high_cor <- which(abs(cor_matrix) > 0.70 & upper.tri(cor_matrix), arr.ind = TRUE)
+if (nrow(high_cor) > 0) {
+  for (i in seq_len(nrow(high_cor))) {
+    r <- high_cor[i, ]
+    cat(sprintf("  %s  ↔  %s : r = %.2f\n",
+                rownames(cor_matrix)[r[1]], colnames(cor_matrix)[r[2]],
+                cor_matrix[r[1], r[2]]))
+  }
+} else {
+  cat("  None found — all pairwise correlations below 0.70\n")
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INTERPRETATION OF RESULTS (WITH GDP_PC)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Five distinct patterns emerge:
+
+# 1. GOVERNANCE BLOCK (reg_quality, corruption, pol_stability, voice_acc)
+#    Still extremely tightly correlated (r = 0.71–0.93). The strongest pair is
+#    reg_quality ↔ corruption at 0.93 — effectively redundant measures.
+#    → ACTION: Include only ONE governance variable in the baseline.
+#      Use others in robustness checks (one at a time).
+
+# 2. DEVELOPMENT BLOCK (gdp_pc + governance + credit_gdp)
+#    gdp_pc is strongly positively correlated with governance indicators
+#    (r = 0.63–0.80) and credit_gdp (r = 0.63).
+#    This indicates a broader “development” dimension: richer countries have
+#    stronger institutions and deeper financial systems.
+#    → IMPLICATION: Including gdp_pc together with governance variables risks
+#      multicollinearity and conceptual overlap (institutions vs development level).
+#    → ACTION: Avoid including gdp_pc and governance simultaneously in the
+#      baseline; treat them as alternative controls.
+
+# 3. MIMIC ↔ DEVELOPMENT / GOVERNANCE (r = -0.48 to -0.68)
+#    MIMIC is strongly negatively correlated with both governance and gdp_pc
+#    (e.g., gdp_pc: -0.66). Informality is clearly a “low development” feature.
+#    → IMPLICATION: The MPS × MIMIC interaction may partly reflect broader
+#      development effects, not just informality.
+#    → ACTION: Control for either governance OR gdp_pc to isolate the channel.
+
+# 4. CREDIT_GDP ↔ DEVELOPMENT (r = 0.63 with gdp_pc; 0.53–0.73 with governance)
+#    credit_gdp loads on the same development dimension but remains below the
+#    critical 0.85 threshold.
+#    → ACTION: Safe to include with either gdp_pc or one governance variable,
+#      but monitor standard errors.
+
+# 5. MACRO VARIABLES (gdp_growth, infl)
+#    Still weakly correlated with everything (|r| ≤ 0.30).
+#    → ACTION: Clean controls; no multicollinearity concerns.
+
+# ══════════════════════════════════════════════════════════════════════════════
+
+```
+
+```{r}
+#| label: Clean Up — Diagnostic Temp Objects
+
+# Remove all temporary objects created during Diagnostics 1–4.
+# Only df_world_2000_2019 carries forward from here.
+rm(
+  vars_urt, min_obs, results, country_pvals, urt_summary,       # Diag 1
+  ar1_country, mimic_ar,                                        # Diag 2.0
+  mimic_check,                                                  # Diag 2.1
+  mimic_variation, examples,                                    # Diag 2.2
+  test,                                                         # Diag 2.3
+  vars_decomp, decomp,                                          # Diag 3
+  controls_cor, cor_matrix, high_cor,                           # Diag 4
+  i, r, v # values
+)
+
+```
+
+```{r}
+#| label: Create Lagged Variables
+#| output: true
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CREATE LAGGED VARIABLES
+# ══════════════════════════════════════════════════════════════════════════════
+
+# PURPOSE:
+# All controls and the informality measure enter the LP regression as one-period
+# lags (t-1). This ensures they are PRE-DETERMINED relative to the monetary
+# policy shock at time t, avoiding simultaneity bias. For example, if MPS at
+# time t pushes firms into informality, using MIMIC_{t-1} sidesteps that
+# reverse causality because last year's informality can't be caused by this
+# year's shock.
+
+# Diagnostic 2 confirmed MIMIC is highly persistent (AR(1) ≈ 0.91), so
+# MIMIC_{t-1} is an excellent proxy for the current structural level.
+
+# CRITICAL: We use dplyr::lag() explicitly throughout — the tseries package
+# causes stats::lag to mask dplyr::lag, which does NOT shift values
+# (confirmed in Diagnostic 2.3).
+
+# VARIABLES LAGGED:
+#   - mimic (key moderating variable)
+#   - gdp_growth, infl (macro controls)
+#   - credit_gdp (financial depth control)
+#   - pol_stability (baseline governance control)
+#   - reg_quality, corruption, voice_acc (robustness governance alternatives)
+# ══════════════════════════════════════════════════════════════════════════════
+
+df_world_2000_2019 <- df_world_2000_2019 %>%
+  arrange(country, year) %>%
+  group_by(country) %>%
+  mutate(
+    # --- Key moderating variable ---
+    mimic_t_minus1         = dplyr::lag(mimic, 1),
+
+    # --- Macro controls ---
+    gdp_growth_t_minus1    = dplyr::lag(gdp_growth, 1),
+    gdp_pc_t_minus1        = dplyr::lag(gdp_pc, 1),
+    infl_t_minus1          = dplyr::lag(infl, 1),
+    
+    # Log GDP per capita
+    lgdp_pc = log(gdp_pc),
+
+    # --- Financial depth control ---
+    credit_gdp_t_minus1    = dplyr::lag(credit_gdp, 1),
+
+    # --- Governance: baseline ---
+    pol_stability_t_minus1 = dplyr::lag(pol_stability, 1),
+
+    # --- Governance: robustness alternatives ---
+    reg_quality_t_minus1   = dplyr::lag(reg_quality, 1),
+    corruption_t_minus1    = dplyr::lag(corruption, 1),
+    voice_acc_t_minus1     = dplyr::lag(voice_acc, 1)
+  ) %>%
+  ungroup()
+
+# Quick verification: show Brazil to confirm lags are correctly shifted
+cat("══════════════════════════════════════════════════════════════════\n")
+cat("  LAG VERIFICATION — Brazil (mimic and infl)\n")
+cat("══════════════════════════════════════════════════════════════════\n\n")
+df_world_2000_2019 %>%
+  filter(country == "Brazil") %>%
+  select(country, year, mimic, mimic_t_minus1, infl, infl_t_minus1) %>%
+  print(n = 10)
+
+```
+
+
+```{r}
+#| label: Construct Forward-Looking Dependent Variables
+#| output: true
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CONSTRUCT FORWARD-LOOKING DEPENDENT VARIABLES
+# ══════════════════════════════════════════════════════════════════════════════
+
+# PURPOSE:
+# In local projections (Jordà 2005), we estimate a separate regression for
+# each forecast horizon h. The dependent variable at horizon h is the
+# CUMULATIVE CHANGE in the outcome from just before the shock (t-1) to
+# the future period (t+h):
+
+# Main dependent
+#   d_infl_h      = π_{i,t+h} − π_{i,t−1}
+#   log(d_gdp_pc_h) = d_lgdp_pc_h    = log(y_{i,t+h}) − log(y_{i,t−1})
+
+#  Sideline dependent:
+#   d_gdp_growth_h = g_{i,t+h} − g_{i,t−1}
+
+# This measures the total impulse response: how much has inflation (or growth)
+# moved h years after the monetary policy shock, relative to its pre-shock level.
+
+# We construct these for horizons h = 0, 1, 2, 3, 4, 5.
+#   h = 0: contemporaneous response (same year as shock)
+#   h = 1: one year after the shock
+#   ...
+#   h = 5: five years after the shock
+
+# IMPORTANT: dplyr::lead() is used to pull future values. Like dplyr::lag(),
+# this must be done WITHIN each country group to avoid pulling values from
+# a different country. We also need lagged inflation/growth (t-1) as the
+# baseline, which we already created in Phase 1.4.
+
+# NOTE: Higher horizons (h = 4, 5) will have more missing values because
+# for a country observed until 2019, h = 5 requires data from 2024 — which
+# doesn't exist. The effective sample shrinks as h increases.
+# ══════════════════════════════════════════════════════════════════════════════
+
+max_horizon <- 5
+
+df_world_2000_2019 <- df_world_2000_2019 %>%
+  arrange(country, year) %>%
+  group_by(country) %>%
+  mutate(
+    # Lagged values (baseline for cumulative change)
+    infl_t_minus1       = dplyr::lag(infl, 1),
+    gdp_pc_t_minus1      = dplyr::lag(gdp_pc, 1),
+    lgdp_pc_t_minus1      = dplyr::lag(lgdp_pc, 1),
+    gdp_growth_t_minus1 = dplyr::lag(gdp_growth, 1)
+  ) %>%
+  ungroup()
+
+# Create cumulative change variables for each horizon h = 0 to max_horizon
+for (h in 0:max_horizon) {
+  # Inflation: d_infl_h = infl_{t+h} - infl_{t-1}
+  infl_lead_name <- paste0("d_infl_h", h)
+    # Log GDP per capita: d_lgdp_pc_h = lgdp_pc_{t+h} - lgdp_pc_{t-1}
+  lgdp_pc_lead_name <- paste0("d_lgdp_pc_h", h)
+  # GDP growth: d_gdp_growth_h = gdp_growth_{t+h} - gdp_growth_{t-1}
+  gdp_growth_lead_name  <- paste0("d_gdp_growth_h", h)
+
+  df_world_2000_2019 <- df_world_2000_2019 %>%
+    arrange(country, year) %>%
+    group_by(country) %>%
+    mutate(
+      !!infl_lead_name := dplyr::lead(infl, h) - infl_t_minus1,
+      !!lgdp_pc_lead_name := dplyr::lead(lgdp_pc, h) - lgdp_pc_t_minus1,
+      !!gdp_growth_lead_name  := dplyr::lead(gdp_growth, h) - gdp_growth_t_minus1
+    ) %>%
+    ungroup()
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Verification: show Brazil's inflation dependent variables
+cat("══════════════════════════════════════════════════════════════════\n")
+cat("  FORWARD-LOOKING MAIN DEPENDENT VARIABLES — Brazil (inflation)\n")
+cat("──────────────────────────────────────────────────────────────────\n")
+cat("  d_infl_h0 = infl_t - infl_{t-1} (contemporaneous change)\n")
+cat("  d_infl_h3 = infl_{t+3} - infl_{t-1} (cumulative change over 3 years)\n")
+cat("  d_infl_h5 = infl_{t+5} - infl_{t-1} (cumulative change over 5 years)\n")
+cat("══════════════════════════════════════════════════════════════════\n\n")
+df_world_2000_2019 %>%
+  filter(country == "Brazil") %>%
+  select(country, year, infl, infl_t_minus1, d_infl_h0, d_infl_h1, d_infl_h2, d_infl_h3, d_infl_h4, d_infl_h5) %>%
+  print(n = 12)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Verification: show Brazil's GDP Growth dependent variables
+cat("══════════════════════════════════════════════════════════════════\n")
+cat("  FORWARD-LOOKING MAIN DEPENDENT VARIABLES — Brazil (Logged GDP per capita)\n")
+cat("──────────────────────────────────────────────────────────────────\n")
+cat("  d_lgdp_pc_h0 = d_lgdp_pc_t - lgdp_pc_{t-1} (contemporaneous change)\n")
+cat("  d_lgdp_pc_h3 = d_lgdp_pc_{t+3} - lgdp_pc_{t-1} (cumulative change over 3 years)\n")
+cat("  d_lgdp_pc_h5 = d_lgdp_pc_{t+5} - lgdp_pc_{t-1} (cumulative change over 5 years)\n")
+cat("══════════════════════════════════════════════════════════════════\n\n")
+df_world_2000_2019 %>%
+  filter(country == "Brazil") %>%
+  select(country, year, lgdp_pc, lgdp_pc_t_minus1, d_lgdp_pc_h0, d_lgdp_pc_h1, d_lgdp_pc_h2, d_lgdp_pc_h3, d_lgdp_pc_h4) %>%
+  print(n = 12)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Verification: show Brazil's GDP Growth dependent variables
+cat("══════════════════════════════════════════════════════════════════\n")
+cat("  FORWARD-LOOKING SIDELINE DEPENDENT VARIABLES — Brazil (GDP Growth)\n")
+cat("──────────────────────────────────────────────────────────────────\n")
+cat("  d_gdp_growth_h0 = gdp_growth_t - gdp_growth_{t-1} (contemporaneous change)\n")
+cat("  d_gdp_growth_h3 = gdp_growth_{t+3} - gdp_growth_{t-1} (cumulative change over 3 years)\n")
+cat("  d_gdp_growth_h5 = gdp_growth_{t+5} - gdp_growth_{t-1} (cumulative change over 5 years)\n")
+cat("══════════════════════════════════════════════════════════════════\n\n")
+df_world_2000_2019 %>%
+  filter(country == "Brazil") %>%
+  select(country, year, gdp_growth, gdp_growth_t_minus1, d_gdp_growth_h0, d_gdp_growth_h1, d_gdp_growth_h2, d_gdp_growth_h3, d_gdp_growth_h4) %>%
+  print(n = 12)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Show how sample size shrinks with horizon
+cat("\n── Non-missing observations by horizon ──\n")
+horizon_coverage <- data.frame(
+  horizon = 0:max_horizon,
+  n_infl  = sapply(0:max_horizon, function(h) sum(!is.na(df_world_2000_2019[[paste0("d_infl_h", h)]]))),
+  n_gdp_pc  = sapply(0:max_horizon, function(h) sum(!is.na(df_world_2000_2019[[paste0("d_lgdp_pc_h", h)]]))),
+  n_gdp_growth   = sapply(0:max_horizon, function(h) sum(!is.na(df_world_2000_2019[[paste0("d_gdp_growth_h", h)]])))
+)
+print(horizon_coverage, row.names = FALSE)
+
+
+```
+
+
+```{r}
+#| label: Create Interaction Terms
+#| output: true
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CREATE INTERACTION TERMS
+# ══════════════════════════════════════════════════════════════════════════════
+
+# PURPOSE:
+# The core identification strategy relies on the interaction MPS × MIMIC.
+# The coefficient δ_h on this interaction captures how the effect of a
+# monetary policy shock on inflation DEPENDS on the level of informality.
+
+#   δ_h > 0 → higher informality DAMPENS the inflation response to MPS
+#   δ_h < 0 → higher informality AMPLIFIES the inflation response
+#   δ_h ≈ 0 → informality doesn't moderate monetary transmission
+
+# We use LAGGED MIMIC (t-1) in the interaction to maintain pre-determination.
+# Since MIMIC is 99.6% between-country (Diagnostic 3), the interaction
+# effectively asks: "does the same MPS shock produce a different response
+# in high-informality vs. low-informality countries?"
+# ══════════════════════════════════════════════════════════════════════════════
+
+df_world_2000_2019 <- df_world_2000_2019 %>%
+  mutate(
+    # --- Core interaction ---
+    mps_x_mimic = mps * mimic_t_minus1
+  )
+
+# Quick summary of the interaction term
+cat("══════════════════════════════════════════════════════════════════\n")
+cat("  INTERACTION TERM SUMMARY: mps_x_mimic = MPS × MIMIC_{t-1}\n")
+cat("══════════════════════════════════════════════════════════════════\n\n")
+cat("Non-missing observations:", sum(!is.na(df_world_2000_2019$mps_x_mimic)), "\n\n")
+print(summary(df_world_2000_2019$mps_x_mimic))
+
+```
+
+```{r}
+#| label: Visualize Outliers 1. — Shock and Macro Variables
+#| output: true
+
+
+# Group 1: MPS, Inflation, GDP Growth (the variables most likely to need winsorization)
+vars_group1 <- c("mps", "infl", "gdp_growth")
+
+df_box1 <- df_world_2000_2019 %>%
+  select(dev_status, all_of(vars_group1)) %>%
+  filter(!is.na(dev_status)) %>%
+  pivot_longer(cols = all_of(vars_group1), names_to = "variable", values_to = "value") %>%
+  filter(!is.na(value))
+
+ggplot(df_box1, aes(x = dev_status, y = value, fill = dev_status)) +
+  geom_boxplot(outlier.colour = "red", outlier.alpha = 0.4, outlier.size = 1) +
+  facet_wrap(~ variable, scales = "free_y", ncol = 3) +
+  labs(title = "Shock & Macro Variables: Boxplots by Development Status",
+       subtitle = "Red dots = outliers beyond 1.5×IQR | Before winsorization",
+       x = NULL, y = "Value") +
+  theme_minimal(base_family = "serif") +
+  theme(legend.position = "none")
+
+ggplot(df_box1, aes(x = value, fill = dev_status)) +
+  geom_histogram(bins = 50, alpha = 0.6, position = "identity") +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  labs(title = "Shock & Macro Variables: Histograms",
+       x = "Value", y = "Count", fill = "Status") +
+  theme_minimal(base_family = "serif")
+
+```
+
+```{r}
+#| label: Visualize Outliers 2. — Informality and Financial Depth
+#| output: true
+#| fig-width: 10
+#| fig-height: 4
+
+# Group 2: MIMIC, Credit/GDP, Political Stability (informality + baseline controls)
+vars_group2 <- c("mimic", "credit_gdp", "pol_stability")
+
+df_box2 <- df_world_2000_2019 %>%
+  select(dev_status, all_of(vars_group2)) %>%
+  filter(!is.na(dev_status)) %>%
+  pivot_longer(cols = all_of(vars_group2), names_to = "variable", values_to = "value") %>%
+  filter(!is.na(value))
+
+ggplot(df_box2, aes(x = dev_status, y = value, fill = dev_status)) +
+  geom_boxplot(outlier.colour = "red", outlier.alpha = 0.4, outlier.size = 1) +
+  facet_wrap(~ variable, scales = "free_y", ncol = 3) +
+  labs(title = "Informality & Baseline Controls — Boxplots by Development Status",
+       subtitle = "Red dots = outliers beyond 1.5×IQR | Before winsorization",
+       x = NULL, y = "Value") +
+  theme_minimal(base_family = "serif") +
+  theme(legend.position = "none")
+
+ggplot(df_box2, aes(x = value, fill = dev_status)) +
+  geom_histogram(bins = 50, alpha = 0.6, position = "identity") +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  labs(title = "Informality & Baseline Controls — Histograms",
+       x = "Value", y = "Count", fill = "Status") +
+  theme_minimal(base_family = "serif")
+
+```
+
+
+```{r}
+#| label: Visualize Outliers 3. — Governance Variables
+#| output: true
+#| fig-width: 10
+#| fig-height: 4
+
+# Group 3: Regulatory Quality, Corruption, Voice & Accountability (robustness governance)
+vars_group3 <- c("reg_quality", "corruption", "voice_acc")
+
+df_box3 <- df_world_2000_2019 %>%
+  select(dev_status, all_of(vars_group3)) %>%
+  filter(!is.na(dev_status)) %>%
+  pivot_longer(cols = all_of(vars_group3), names_to = "variable", values_to = "value") %>%
+  filter(!is.na(value))
+
+ggplot(df_box3, aes(x = dev_status, y = value, fill = dev_status)) +
+  geom_boxplot(outlier.colour = "red", outlier.alpha = 0.4, outlier.size = 1) +
+  facet_wrap(~ variable, scales = "free_y", ncol = 3) +
+  labs(title = "Governance Variables — Boxplots by Development Status",
+       subtitle = "Red dots = outliers beyond 1.5×IQR | Before winsorization",
+       x = NULL, y = "Value") +
+  theme_minimal(base_family = "serif") +
+  theme(legend.position = "none")
+
+ggplot(df_box3, aes(x = value, fill = dev_status)) +
+  geom_histogram(bins = 50, alpha = 0.6, position = "identity") +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  labs(title = "Governance Variables — Histograms",
+       x = "Value", y = "Count", fill = "Status") +
+  theme_minimal(base_family = "serif")
+
+```
+
+
+```{r}
+#| label: Visualize Outliers 4. All 9 boxplots & histogr combined
+#| output: true
+
+
+# Visualize the distribution of ALL specification variables
+# to identify outliers before deciding on winsorization
+
+vars_outlier <- c("mps", "infl", "gdp_growth", "mimic", "credit_gdp",
+                  "pol_stability", "reg_quality", "corruption", "voice_acc")
+
+# --- Boxplots by development status ---
+df_box <- df_world_2000_2019 %>%
+  select(dev_status, all_of(vars_outlier)) %>%
+  filter(!is.na(dev_status)) %>%
+  pivot_longer(cols = all_of(vars_outlier), names_to = "variable", values_to = "value") %>%
+  filter(!is.na(value))
+
+ggplot(df_box, aes(x = dev_status, y = value, fill = dev_status)) +
+  geom_boxplot(outlier.colour = "red", outlier.alpha = 0.4, outlier.size = 1) +
+  facet_wrap(~ variable, scales = "free_y", ncol = 3) +
+  labs(title = "Distribution of All Specification Variables by Development Status",
+       subtitle = "Red dots = outliers beyond 1.5×IQR | Before any winsorization",
+       x = NULL, y = "Value") +
+  theme_minimal(base_family = "serif") +
+  theme(legend.position = "none")
+
+# --- Histograms to see the full shape of each distribution ---
+ggplot(df_box, aes(x = value, fill = dev_status)) +
+  geom_histogram(bins = 50, alpha = 0.6, position = "identity") +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  labs(title = "Histograms of All Specification Variables",
+       subtitle = "Look for heavy tails and extreme outliers",
+       x = "Value", y = "Count", fill = "Status") +
+  theme_minimal(base_family = "serif")
+
+
+```
+
+```{r}
+#| label: Visualize Outliers 4. - Extreme Values Table
+#| output: true
+
+# Print the most extreme values for all specification variables
+vars_outlier <- c("mps", "infl", "gdp_growth", "mimic", "credit_gdp",
+                  "pol_stability", "reg_quality", "corruption", "voice_acc")
+
+cat("── Top 5 most extreme values (both tails) ──\n")
+for (v in vars_outlier) {
+  cat(sprintf("\n%s — LOWEST 5:\n", toupper(v)))
+  df_world_2000_2019 %>%
+    filter(!is.na(.data[[v]])) %>%
+    arrange(.data[[v]]) %>%
+    select(country, year, dev_status, all_of(v)) %>%
+    head(5) %>%
+    print()
+
+  cat(sprintf("\n%s — HIGHEST 5:\n", toupper(v)))
+  df_world_2000_2019 %>%
+    filter(!is.na(.data[[v]])) %>%
+    arrange(desc(.data[[v]])) %>%
+    select(country, year, dev_status, all_of(v)) %>%
+    head(5) %>%
+    print()
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INTERPRETATION OF OUTLIER ANALYSIS
+# ══════════════════════════════════════════════════════════════════════════════
+
+# 1. WINSORIZE — MPS, INFLATION, GDP GROWTH
+#    These three variables show severe outliers that would dominate OLS:
+
+#    MPS: Turkey 2000 = 68.6, roughly 36× the emerging-market SD. Turkey
+#    alone accounts for 4 of the 5 lowest and 2 of the 5 highest MPS values.
+#    A single country should not drive the entire regression.
+
+#    Inflation: Hyperinflation episodes — DRC at 514, Angola at 325.
+#    Genuine but orders of magnitude above the median (~4.5).
+
+#    GDP growth: Conflict-driven swings — Libya goes from -50.3 (2011) to
+#    +86.8 (2012) in consecutive years. Extreme but mechanically influential.
+
+#    → ACTION: Winsorize all three at 1st/99th percentiles in Phase 1.7.
+
+# 2. DO NOT WINSORIZE — GDP per Capita
+#    Variable is already logged, no need to winsorize it
+
+# 3. DO NOT WINSORIZE — MIMIC
+#    Range is 8.1 (USA) to 68.2 (Bolivia). These are NOT outliers — they are
+#    the actual cross-country spread that identifies the MPS × MIMIC
+#    interaction. Capping the extremes would compress exactly the variation
+#    the paper needs.
+
+# 4. DO NOT WINSORIZE — CREDIT/GDP
+#    Iceland at 305 (pre-crisis banking boom) looks extreme but enters as
+#    a lagged control, not a dependent variable. The value is economically
+#    real and its influence on the regression is limited.
+
+# 5. DO NOT WINSORIZE — GOVERNANCE VARIABLES
+#    All bounded on a fixed [-2.5, 2.5] scale. Extremes (Somalia at -3.05
+#    for pol_stability) are near-boundary values, not data errors.
+#    Winsorizing bounded indices is not meaningful.
+
+# 6. ROBUSTNESS FLAG — TURKEY
+#    Turkey is extraordinarily influential in MPS (max = 68.6, min = -19.5).
+#    Even after winsorizing, it will pull weight. Add a robustness check
+#    excluding Turkey entirely to show results are not driven by one country.
+# ══════════════════════════════════════════════════════════════════════════════
+
+```
+```{r}
+#| label: Clean Up — Outlier Visualization Temp Objects
+
+# Remove temporary plot data frames and helper vectors from outlier visualization.
+# df_world_2000_2019 carries forward for winsorization.
+rm(
+  vars_group1, vars_group2, vars_group3, vars_outlier,
+  df_box1, df_box2, df_box3, df_box,
+  gdp_growth_lead_name, gdp_lead_name, gdp_pc_lead_name, h, infl_lead_name,
+  lgdp_pc_lead_name, v
+)
+
+```
+
+```{r}
+#| label: Outlier Treatment (Winsorization)
+#| output: true
+
+# ══════════════════════════════════════════════════════════════════════════════
+# OUTLIER TREATMENT (WINSORIZATION)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# PURPOSE:
+# Extreme values in MPS, inflation, and GDP growth can dominate OLS estimates.
+# From the descriptive statistics:
+#   - MPS in emerging markets: max = 68.65 (vs. SD ≈ 1.91)
+#   - Inflation: max = 513.9 (vs. median ≈ 4.5)
+#   - GDP growth: min = -50.34, max = 86.83
+
+# These are genuine observations (hyperinflation episodes, extreme policy
+# moves) but a few such values can disproportionately drive regression
+# coefficients in a sample of thousands.
+
+# WINSORIZATION replaces values beyond the 1st and 99th percentiles with
+# the value at that percentile. This retains the observation (unlike
+# trimming/dropping) but caps its influence.
+
+# We create BOTH winsorized and original versions so results can be
+# shown both ways (main specification uses winsorized; robustness uses raw).
+
+# NOTE: Winsorization is applied to the RAW variables. The forward-looking
+# dependent variables (d_infl_h*, d_gdp_growth_h*) were constructed from the raw
+# values, so we rebuild them after winsorization. Alternatively, we could
+# winsorize the dependent variables directly — we do both and keep the
+# directly winsorized versions for simplicity.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Helper function: winsorize a vector at given lower and upper quantiles
+winsorize <- function(x, probs = c(0.01, 0.99)) {
+  q <- quantile(x, probs = probs, na.rm = TRUE)
+  x[x < q[1] & !is.na(x)] <- q[1]
+  x[x > q[2] & !is.na(x)] <- q[2]
+  return(x)
+}
+
+# --- Show pre-winsorization extremes ---
+cat("══════════════════════════════════════════════════════════════════\n")
+cat("  OUTLIER TREATMENT — Before vs. After Winsorization (1st/99th)\n")
+cat("══════════════════════════════════════════════════════════════════\n\n")
+
+vars_to_winsorize <- c("mps", "infl", "gdp_growth")
+
+cat("── BEFORE winsorization ──\n")
+for (v in vars_to_winsorize) {
+  q <- quantile(df_world_2000_2019[[v]], probs = c(0.01, 0.99), na.rm = TRUE)
+  cat(sprintf("  %s: min = %.2f, max = %.2f | p1 = %.2f, p99 = %.2f\n",
+              v,
+              min(df_world_2000_2019[[v]], na.rm = TRUE),
+              max(df_world_2000_2019[[v]], na.rm = TRUE),
+              q[1], q[2]))
+}
+
+# --- Apply winsorization ---
+df_world_2000_2019 <- df_world_2000_2019 %>%
+  mutate(
+    mps_w        = winsorize(mps),
+    infl_w       = winsorize(infl),
+    gdp_growth_w = winsorize(gdp_growth)
+  )
+
+cat("\n── AFTER winsorization (new _w variables) ──\n")
+for (v in paste0(vars_to_winsorize, "_w")) {
+  cat(sprintf("  %s: min = %.2f, max = %.2f\n",
+              v,
+              min(df_world_2000_2019[[v]], na.rm = TRUE),
+              max(df_world_2000_2019[[v]], na.rm = TRUE)))
+}
+
+# --- Rebuild winsorized dependent variables and interaction ---
+# Winsorized lagged values
+df_world_2000_2019 <- df_world_2000_2019 %>%
+  arrange(country, year) %>%
+  group_by(country) %>%
+  mutate(
+    infl_w_t_minus1       = dplyr::lag(infl_w, 1),
+    gdp_growth_w_t_minus1 = dplyr::lag(gdp_growth_w, 1)
+  ) %>%
+  ungroup()
+
+# Winsorized forward-looking dependent variables
+for (h in 0:max_horizon) {
+  infl_lead_name <- paste0("d_infl_w_h", h)
+  gdp_growth_lead_name  <- paste0("d_gdp_growth_w_h", h)
+
+  df_world_2000_2019 <- df_world_2000_2019 %>%
+    arrange(country, year) %>%
+    group_by(country) %>%
+    mutate(
+      !!infl_lead_name := dplyr::lead(infl_w, h) - infl_w_t_minus1,
+      !!gdp_growth_lead_name  := dplyr::lead(gdp_growth_w, h) - gdp_growth_w_t_minus1
+    ) %>%
+    ungroup()
+}
+
+# Winsorized interaction
+df_world_2000_2019 <- df_world_2000_2019 %>%
+  mutate(mps_w_x_mimic = mps_w * mimic_t_minus1)
+
+cat("\n── Observations affected by winsorization ──\n")
+cat(sprintf("  mps:        %d values capped\n",
+            sum(df_world_2000_2019$mps != df_world_2000_2019$mps_w, na.rm = TRUE)))
+cat(sprintf("  infl:       %d values capped\n",
+            sum(df_world_2000_2019$infl != df_world_2000_2019$infl_w, na.rm = TRUE)))
+cat(sprintf("  gdp_growth: %d values capped\n",
+            sum(df_world_2000_2019$gdp_growth != df_world_2000_2019$gdp_growth_w, na.rm = TRUE)))
+
+```
+
+
+```{r}
+#| label: Document Effective Estimation Sample
+#| output: true
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DOCUMENT THE EFFECTIVE ESTIMATION SAMPLE
+# ══════════════════════════════════════════════════════════════════════════════
+
+# PURPOSE:
+# The effective estimation sample is the subset of country-year observations
+# where ALL variables needed for the baseline LP regression are non-missing
+# simultaneously. This is typically much smaller than the raw panel because
+# missingness in different variables drops different observations.
+
+# The baseline LP regression at horizon h requires:
+#   Dependent:   d_infl_w_h{h}, d_lgdp_pc_h{h}, or d_gdp_growth_w_h{h}
+#   Regressors:  mps_w, mimic_t_minus1, mps_w_x_mimic,
+#                gdp_growth_w_t_minus1, infl_w_t_minus1, credit_gdp_t_minus1,
+#                pol_stability_t_minus1
+#   Fixed effects: country, year
+
+# We report the sample at h = 0 (largest possible) and show how it shrinks
+# with each horizon increase. This table goes in the paper's data section.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Define baseline regressors (same for all horizons)
+baseline_regressors <- c("mps_w", "mimic_t_minus1", "mps_w_x_mimic",
+                         "gdp_growth_w_t_minus1", "infl_w_t_minus1",
+                         "credit_gdp_t_minus1", "pol_stability_t_minus1",
+                         "country", "year")
+
+# For each horizon, count complete cases
+sample_summary <- data.frame(
+  horizon       = 0:max_horizon,
+  n_obs_infl    = NA_integer_,
+  n_obs_lgdp    = NA_integer_,
+  n_countries_infl = NA_integer_,
+  n_countries_lgdp = NA_integer_
+)
+
+for (h in 0:max_horizon) {
+  # Inflation sample
+  infl_dep <- paste0("d_infl_w_h", h)
+  infl_vars <- c(infl_dep, baseline_regressors)
+  infl_complete <- df_world_2000_2019 %>%
+    select(all_of(infl_vars)) %>%
+    na.omit()
+  sample_summary$n_obs_infl[h + 1]       <- nrow(infl_complete)
+  sample_summary$n_countries_infl[h + 1]  <- n_distinct(infl_complete$country)
+
+  # Log GDP per capita sample
+  lgdp_dep <- paste0("d_lgdp_pc_h", h)
+  lgdp_vars <- c(lgdp_dep, baseline_regressors)
+  lgdp_complete <- df_world_2000_2019 %>%
+    select(all_of(lgdp_vars)) %>%
+    na.omit()
+  sample_summary$n_obs_lgdp[h + 1]       <- nrow(lgdp_complete)
+  sample_summary$n_countries_lgdp[h + 1]  <- n_distinct(lgdp_complete$country)
+}
+
+cat("══════════════════════════════════════════════════════════════════\n")
+cat("  EFFECTIVE ESTIMATION SAMPLE BY HORIZON\n")
+cat("──────────────────────────────────────────────────────────────────\n")
+cat("  All baseline regressors + dependent variable non-missing\n")
+cat("══════════════════════════════════════════════════════════════════\n\n")
+print(sample_summary, row.names = FALSE)
+
+# Detailed breakdown at h = 0: average time-series length per country
+h0_infl_vars <- c("d_infl_w_h0", baseline_regressors)
+h0_sample <- df_world_2000_2019 %>%
+  select(all_of(h0_infl_vars)) %>%
+  na.omit()
+
+ts_length <- h0_sample %>%
+  group_by(country) %>%
+  summarise(T_i = n(), .groups = "drop")
+
+cat("\n── Baseline sample details (h = 0, inflation) ──\n")
+cat("  Total observations:", nrow(h0_sample), "\n")
+cat("  Countries:         ", n_distinct(h0_sample$country), "\n")
+cat("  Avg years/country: ", round(mean(ts_length$T_i), 1), "\n")
+cat("  Min years/country: ", min(ts_length$T_i), "\n")
+cat("  Max years/country: ", max(ts_length$T_i), "\n")
+
+```
+
+
+```{r}
+#| label: Verify Panel Structure and Apply Minimum Threshold
+#| output: true
+
+# ══════════════════════════════════════════════════════════════════════════════
+# VERIFY PANEL STRUCTURE & APPLY MINIMUM THRESHOLD
+# ══════════════════════════════════════════════════════════════════════════════
+
+# PURPOSE:
+# Countries with very few usable observations (e.g., 1–3 years in the
+# estimation sample) contribute almost no identifying variation and can
+# introduce noise. LP estimation needs enough time-series depth per country
+# to capture dynamics — a minimum of 5 years is a common threshold.
+#
+# We check the distribution of per-country observation counts in the
+# effective sample and flag countries below the threshold for exclusion.
+# This is done on the h = 0 sample (most complete horizon).
+
+# WHAT THIS CHUNK DOES:
+#   1. Show distribution of per-country time-series lengths
+#   2. List countries below the threshold
+#   3. Create a filtered "estimation ready" dataset excluding thin countries
+#   4. Report the final sample size
+# ══════════════════════════════════════════════════════════════════════════════
+
+min_T <- 5  # Minimum usable years per country
+
+# Step 1: Per-country observation count in the effective sample (h = 0)
+h0_vars <- c("d_infl_w_h0", baseline_regressors)
+
+country_T <- df_world_2000_2019 %>%
+  select(all_of(h0_vars)) %>%
+  na.omit() %>%
+  group_by(country) %>%
+  summarise(T_i = n(), .groups = "drop") %>%
+  arrange(T_i)
+
+cat("══════════════════════════════════════════════════════════════════\n")
+cat("  PER-COUNTRY TIME-SERIES LENGTH IN ESTIMATION SAMPLE (h = 0)\n")
+cat("══════════════════════════════════════════════════════════════════\n\n")
+print(summary(country_T$T_i))
+
+# Step 2: Flag countries below threshold
+thin_countries <- country_T %>% filter(T_i < min_T)
+
+cat(sprintf("\n── Countries with fewer than %d usable years: %d ──\n",
+            min_T, nrow(thin_countries)))
+if (nrow(thin_countries) > 0) {
+  print(thin_countries, n = nrow(thin_countries))
+} else {
+  cat("  None — all countries meet the minimum threshold\n")
+}
+
+# Step 3: Identify countries that pass the threshold
+keep_countries <- country_T %>% filter(T_i >= min_T) %>% pull(country)
+
+# Create the estimation-ready dataset
+# This is the dataset that will be used for ALL LP regressions going forward
+df_est <- df_world_2000_2019 %>%
+  filter(country %in% keep_countries)
+
+# Step 4: Report final sample
+cat(sprintf("\n══════════════════════════════════════════════════════════════════\n"))
+cat(sprintf("  FINAL ESTIMATION-READY DATASET: df_est\n"))
+cat(sprintf("──────────────────────────────────────────────────────────────────\n"))
+cat(sprintf("  Countries retained:   %d (of %d in full panel)\n",
+            n_distinct(df_est$country), n_distinct(df_world_2000_2019$country)))
+cat(sprintf("  Countries dropped:    %d (fewer than %d usable years)\n",
+            nrow(thin_countries), min_T))
+cat(sprintf("  Total rows in df_est: %d\n", nrow(df_est)))
+cat(sprintf("══════════════════════════════════════════════════════════════════\n"))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 1 COMPLETE
+# ══════════════════════════════════════════════════════════════════════════════
+# The dataset df_est is now estimation-ready for Phase 2 (descriptive
+# visualizations) and Phase 3 (LP regressions).
+
+# Contents of df_est:
+#   Identifiers:  country, year, code, continent_code, dev_status, dev_binary
+#   Shock:        mps, mps_w (winsorized)
+#   Informality:  mimic, mimic_t_minus1
+#   Interaction:  mps_x_mimic, mps_w_x_mimic (winsorized)
+#   Dep vars:     d_infl_h0–h5, d_gdp_growth_h0–h5 (raw)
+#                 d_infl_w_h0–h5 (winsorized), d_lgdp_pc_h0–h5 (raw log)
+#                 d_gdp_growth_w_h0–h5 (winsorized, sideline)
+#   Controls:     gdp_growth_t_minus1, infl_t_minus1, credit_gdp_t_minus1,
+#                 pol_stability_t_minus1 (baseline)
+#                 reg_quality_t_minus1, corruption_t_minus1, voice_acc_t_minus1 (robustness)
+#   Winsorized:   gdp_growth_w_t_minus1, infl_w_t_minus1
+# ══════════════════════════════════════════════════════════════════════════════
+
+```
+
+
+```{r}
+#| label: Clean Up — Estimation Sample Temp Objects
+
+# Remove temporary objects from sample documentation and panel verification.
+# Keep: df_world_2000_2019, df_est, keep_countries, baseline_regressors
+rm(
+  sample_summary, infl_complete, gdp_complete,
+  h0_infl_vars, h0_sample, ts_length,
+  h0_vars, country_T, thin_countries, min_T
+)
+
+```
+
+```{r}
+#| label: Geographical Coverage — Full Panel vs Estimation Sample
+#| output: true
+#| fig-width: 12
+#| fig-height: 6
+#| message: false
+#| warning: false
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GEOGRAPHICAL COVERAGE MAPS
+# ══════════════════════════════════════════════════════════════════════════════
+# Two maps side by side:
+#   Map 1: All countries in the full panel (df_world_2000_2019)
+#   Map 2: Countries retained in the estimation-ready sample (df_est)
+# This visualizes which countries were lost during Phase 1 filtering
+# (missingness, minimum observation threshold, etc.)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# --- Load world polygons ---
+world <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf") %>%
+  mutate(iso3c = iso_a3)
+
+# --- Map 1: Full panel ---
+full_iso3 <- df_world_2000_2019 %>%
+  distinct(country) %>%
+  mutate(iso3c = countrycode(country, "country.name", "iso3c")) %>%
+  filter(!is.na(iso3c)) %>%
+  pull(iso3c)
+
+world_full <- world %>%
+  mutate(in_sample = if_else(iso3c %in% full_iso3, "In sample", "Not in sample"))
+
+n_full <- sum(world_full$in_sample == "In sample", na.rm = TRUE)
+
+p1 <- ggplot(world_full) +
+  geom_sf(aes(fill = in_sample), linewidth = 0.1, color = "grey30") +
+  scale_fill_manual(values = c("In sample" = "#2C7FB8", "Not in sample" = "grey85")) +
+  labs(title = paste0("Full Panel (", n_full, " Countries)"),
+       subtitle = "All countries in df_world_2000_2019 before Phase 1 filtering",
+       fill = NULL) +
+  theme_minimal(base_size = 11, base_family = "serif") +
+  theme(legend.position = "bottom",
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+
+print(p1)
+
+```
+
+```{r}
+#| label: Geographical Coverage — Estimation Sample by Development Status
+#| output: true
+#| fig-width: 12
+#| fig-height: 6
+#| message: false
+#| warning: false
+
+# --- Map 2: Estimation sample, colored by development status ---
+est_countries <- df_est %>%
+  distinct(country, dev_status) %>%
+  mutate(iso3c = countrycode(country, "country.name", "iso3c")) %>%
+  filter(!is.na(iso3c))
+
+world_est <- world %>%
+  left_join(est_countries %>% select(iso3c, dev_status), by = "iso3c") %>%
+  mutate(
+    map_status = case_when(
+      dev_status == "Developed" ~ "Developed",
+      dev_status == "Emerging"  ~ "Emerging",
+      TRUE                      ~ "Not in sample"
+    )
+  )
+
+# Ensure draw order: Not in sample behind, Emerging and Developed on top
+world_est$map_status <- factor(world_est$map_status,
+                               levels = c("Not in sample", "Developed", "Emerging"))
+
+n_est       <- sum(!is.na(est_countries$country))
+n_developed <- sum(est_countries$dev_status == "Developed", na.rm = TRUE)
+n_emerging  <- sum(est_countries$dev_status == "Emerging", na.rm = TRUE)
+
+p2 <- ggplot(world_est) +
+  geom_sf(aes(fill = map_status), linewidth = 0.1, color = "grey30") +
+  scale_fill_manual(values = c("Developed"     = "#2C7FB8",
+                               "Emerging"       = "#D95F02",
+                               "Not in sample"  = "grey85")) +
+  labs(title = paste0("Estimation Sample (", n_est, " Countries: ",
+                      n_developed, " Developed, ", n_emerging, " Emerging)"),
+       subtitle = "Countries retained in df_est after Phase 1 filtering",
+       fill = NULL) +
+  theme_minimal(base_size = 11, base_family = "serif") +
+  theme(legend.position = "bottom",
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+
+print(p2)
+
+# --- Summary of countries lost ---
+lost_countries <- df_world_2000_2019 %>%
+  distinct(country) %>%
+  filter(!country %in% keep_countries) %>%
+  mutate(iso3c = countrycode(country, "country.name", "iso3c"))
+
+cat("══════════════════════════════════════════════════════════════════\n")
+cat("  GEOGRAPHICAL COVERAGE SUMMARY\n")
+cat("──────────────────────────────────────────────────────────────────\n")
+cat(sprintf("  Full panel:        %d countries\n", n_distinct(df_world_2000_2019$country)))
+cat(sprintf("  Estimation sample: %d countries (%d Developed, %d Emerging)\n",
+            n_est, n_developed, n_emerging))
+cat(sprintf("  Countries lost:    %d\n", nrow(lost_countries)))
+cat("══════════════════════════════════════════════════════════════════\n")
+
+if (nrow(lost_countries) > 0) {
+  cat("\n── Countries dropped during Phase 1 ──\n")
+  print(lost_countries %>% arrange(country), n = nrow(lost_countries))
+}
+
+# BIG NOTE!
+# IN THE SUBSEQUENT SECTIONS: Turkey and Vietnam are included while in the results and of the paper they are not.
+
+```
+
+
+```{r}
+#| label: Clean Up — Map and Phase 1 Temp Objects
+
+# Remove all map-related temp objects.
+# Going into Phase 2, the environment should contain only:
+#   df_world_2000_2019  (full working panel with all variables)
+#   df_est              (estimation-ready subset)
+#   keep_countries      (vector of retained country names)
+#   baseline_regressors (vector of regressor names for LP)
+#   max_horizon         (integer, = 5)
+rm(
+  world, full_iso3, world_full, n_full, p1,
+  est_countries, world_est, n_est, n_developed, n_emerging, p2,
+  lost_countries
+)
+
+```
+
+```{r}
+
+# From easiest to hardest
+# 1. PCA as main spec, and other could be used a robustness check
+# 2. Causal connection (check email)
+# 3. Connecting clusters of countries that are similar structure but differ on informality
+# 4. IV - contact “ROUTLEDGE HANDBOOK OF THE INFORMAL ECONOMY”
+
+
+```
+
+
+```{r}
+#| label: Governance PCA Composite
+#| output: true
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GOVERNANCE COMPOSITE — PRINCIPAL COMPONENT ANALYSIS (PCA)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# PURPOSE:
+# Diagnostic 4 showed that the four governance variables are highly inter-
+# correlated (r = 0.71–0.90). Including any single one in the baseline is
+# a defensible but somewhat arbitrary choice. PCA extracts a single composite
+# score that captures the common variation across all four, sidestepping the
+# "which one?" question.
+
+# WHAT WE DO:
+#   1. Run PCA on the four LAGGED governance variables (t-1) — for use in
+#      the main LP specification where all controls are pre-determined.
+#   2. Run PCA on the four CONTEMPORANEOUS governance variables — for use
+#      in robustness checks or specifications without the pre-determination
+#      requirement.
+#   3. Report variance explained and loadings for both.
+#   4. Attach PC1 scores as gov_pca_t_minus1 and gov_pca to the dataframe.
+
+# HOW TO INTERPRET:
+#   High gov_pca → strong institutions (high reg_quality,
+#   low corruption, stable politics, strong voice/accountability)
+#   Low gov_pca  → weak institutions
+
+# NOTE: PCA scores are standardized (mean = 0, sd = 1) by construction.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Part A: LAGGED governance PCA (t-1) — for main LP specification ──
+
+gov_vars_lag <- c("reg_quality_t_minus1", "corruption_t_minus1",
+                  "pol_stability_t_minus1", "voice_acc_t_minus1")
+
+gov_lag_idx <- complete.cases(df_world_2000_2019[, gov_vars_lag])
+
+pca_lag <- prcomp(df_world_2000_2019[gov_lag_idx, gov_vars_lag], scale. = TRUE)
+
+cat("══════════════════════════════════════════════════════════════════\n")
+cat("  GOVERNANCE PCA — LAGGED (t-1)\n")
+cat("──────────────────────────────────────────────────────────────────\n")
+cat("  Variables:", paste(gov_vars_lag, collapse = ", "), "\n")
+cat("  Complete cases:", sum(gov_lag_idx), "of", nrow(df_world_2000_2019), "\n")
+cat("══════════════════════════════════════════════════════════════════\n\n")
+
+cat("── Variance explained ──\n")
+print(round(summary(pca_lag)$importance, 3))
+
+cat("\n── PC1 loadings ──\n")
+print(round(pca_lag$rotation[, 1], 3))
+
+# Attach lagged PC1 scores
+df_world_2000_2019$gov_pca_t_minus1 <- NA_real_
+df_world_2000_2019$gov_pca_t_minus1[gov_lag_idx] <- pca_lag$x[, 1]
+
+cat(sprintf("\n── gov_pca_t_minus1 created: %d non-missing values ──\n",
+            sum(!is.na(df_world_2000_2019$gov_pca_t_minus1))))
+print(summary(df_world_2000_2019$gov_pca_t_minus1))
+
+
+# ── Part B: CONTEMPORANEOUS governance PCA — for robustness ──
+
+gov_vars_contemp <- c("reg_quality", "corruption", "pol_stability", "voice_acc")
+
+gov_contemp_idx <- complete.cases(df_world_2000_2019[, gov_vars_contemp])
+
+pca_contemp <- prcomp(df_world_2000_2019[gov_contemp_idx, gov_vars_contemp], scale. = TRUE)
+
+cat("\n\n══════════════════════════════════════════════════════════════════\n")
+cat("  GOVERNANCE PCA — CONTEMPORANEOUS\n")
+cat("──────────────────────────────────────────────────────────────────\n")
+cat("  Variables:", paste(gov_vars_contemp, collapse = ", "), "\n")
+cat("  Complete cases:", sum(gov_contemp_idx), "of", nrow(df_world_2000_2019), "\n")
+cat("══════════════════════════════════════════════════════════════════\n\n")
+
+cat("── Variance explained ──\n")
+print(round(summary(pca_contemp)$importance, 3))
+
+cat("\n── PC1 loadings ──\n")
+print(round(pca_contemp$rotation[, 1], 3))
+
+# Attach contemporaneous PC1 scores
+df_world_2000_2019$gov_pca <- NA_real_
+df_world_2000_2019$gov_pca[gov_contemp_idx] <- pca_contemp$x[, 1]
+
+cat(sprintf("\n── gov_pca created: %d non-missing values ──\n",
+            sum(!is.na(df_world_2000_2019$gov_pca))))
+print(summary(df_world_2000_2019$gov_pca))
+
+# Update df_est with both PCA variables
+df_est <- df_world_2000_2019 %>%
+  filter(country %in% keep_countries)
+
+# Clean up
+rm(gov_vars_lag, gov_vars_contemp, gov_lag_idx, gov_contemp_idx,
+   pca_lag, pca_contemp)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INTERPRETATION OF RESULTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Both versions produce virtually identical results — expected since
+# governance variables are 91–97% between-country (Diagnostic 3) and
+# lagging by one year barely changes them.
+#
+# LAGGED (t-1):
+#   PC1 explains 84.3% of variance. Loadings: reg_quality (0.508),
+#   corruption (0.518), pol_stability (0.472), voice_acc (0.500).
+#   3,443 non-missing values. Range: -4.52 to +4.03.
+
+# CONTEMPORANEOUS:
+#   PC1 explains 84.3% of variance. Loadings: identical to lagged version.
+#   3,637 non-missing values (194 more — gains one year per country since
+#   no lag is consumed). Range: -4.53 to +4.03.
+
+# Key observations:
+#   - Loadings are nearly equal across all four variables. No single
+#     indicator dominates — PC1 is a balanced "institutional quality" index.
+#   - pol_stability has the lowest loading (0.472), consistent with it
+#     capturing something modestly distinct (security/conflict risk vs.
+#     bureaucratic/regulatory quality). This supports using it as the
+#     standalone baseline control — it's the least redundant of the four.
+#   - 84.3% variance explained is very strong. The four governance
+#     indicators are effectively measuring one latent construct.
+
+# Usage in the LP specification:
+#   - Baseline: pol_stability_t_minus1 (single governance control)
+#   - Robustness A: swap for reg_quality_t_minus1, corruption_t_minus1, or
+#     voice_acc_t_minus1 (one at a time)
+#   - Robustness B: swap for gov_pca_t_minus1 (lagged composite)
+#   - Robustness C: swap for gov_pca (contemporaneous composite, tests
+#     whether the pre-determination lag matters for governance controls)
+
+# The near-identical results between lagged and contemporaneous PCA confirm
+# that governance is overwhelmingly a cross-country characteristic — the
+# lag is a formality for econometric cleanliness, not a substantive choice.
+# ══════════════════════════════════════════════════════════════════════════════
+
+```
+
+```{r}
+#| label: Governance PCA Visualized — Scree Plot
+#| output: true
+#| fig-width: 8
+#| fig-height: 5
+
+# Scree plot showing variance explained by each principal component.
+# The sharp drop after PC1 (84.3%) confirms a single component is sufficient.
+
+# Re-run PCA briefly to extract variance shares for plotting
+gov_vars_pca <- c("reg_quality_t_minus1", "corruption_t_minus1",
+                  "pol_stability_t_minus1", "voice_acc_t_minus1")
+pca_fit <- prcomp(df_world_2000_2019[complete.cases(df_world_2000_2019[, gov_vars_pca]), gov_vars_pca],
+                  scale. = TRUE)
+
+# Build plotting data
+scree_df <- data.frame(
+  PC = 1:length(pca_fit$sdev),
+  Variance_Pct = (pca_fit$sdev^2 / sum(pca_fit$sdev^2)) * 100
+)
+
+ggplot(scree_df, aes(x = PC, y = Variance_Pct)) +
+  geom_line(color = "#2C7FB8", linewidth = 0.8) +
+  geom_point(shape = 21, color = "#2C7FB8", fill = "white", size = 3) +
+  geom_hline(yintercept = 5, linetype = "dashed", color = "grey40") +
+  annotate("text", x = 3.7, y = 7,
+           label = "5% threshold", color = "grey40", size = 3.5, family = "serif") +
+  annotate("text", x = 1.3, y = scree_df$Variance_Pct[1] - 3,
+           label = paste0("PC1: ", round(scree_df$Variance_Pct[1], 1), "%"),
+           color = "#2C7FB8", fontface = "bold", size = 4, family = "serif") +
+  scale_x_continuous(breaks = 1:nrow(scree_df)) +
+  labs(title = "Governance PCA — Scree Plot",
+       subtitle = "PC1 alone explains 84.3% of variance across four governance indicators",
+       x = "Principal Component",
+       y = "% Variance Explained") +
+  theme_minimal(base_size = 12, base_family = "serif") +
+  theme(panel.grid.minor = element_blank())
+
+# Clean up
+rm(gov_vars_pca, pca_fit, scree_df)
+
+```
+
+
+```{r}
+#| label: Final Environment Setup for LP Estimation
+#| output: true
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FINAL ENVIRONMENT SETUP — PREPARE FOR LP ESTIMATION
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# PURPOSE:
+# Ensure df_est is the single canonical dataset going forward, define all
+# regressor and specification vectors for the LP models, and clean the
+# environment. After this chunk, only estimation-relevant objects remain.
+#
+# LP ESTIMATION PLAN:
+# We estimate local projections for 2 main + 1 sideline dependent variables:
+#
+#   Part A — Inflation response (MAIN):
+#     A1. Full sample, A2. Developed only, A3. Emerging only
+#
+#   Part B — Log GDP per capita response (MAIN):
+#     B1. Full sample, B2. Developed only, B3. Emerging only
+#
+#   Part C — GDP growth response (SIDELINE, supplementary):
+#     C1. Full sample, C2. Developed only, C3. Emerging only
+#
+# Each set is estimated for horizons h = 0, 1, ..., 5 using the baseline
+# specification + alternative governance robustness checks.
+#
+# GOVERNANCE CONTROLS:
+# Governance variables enter contemporaneously (not lagged). Justification:
+#   - Bounded indices [-2.5, 2.5] — unit root logically impossible
+#   - 91–97% between-country variation (Diagnostic 3) — contemporaneous
+#     and lagged values are virtually identical
+#   - Gains ~194 extra observations vs. lagged version
+#   - PCA confirmed identical results for lagged vs. contemporaneous
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── 1. Rebuild df_est one final time to capture all columns ──
+df_est <- df_world_2000_2019 %>%
+  filter(country %in% keep_countries)
+
+# ── 2. Define regressor vectors ──
+
+# Baseline specification (contemporaneous governance: pol_stability)
+baseline_regressors <- c("mps_w", "mimic_t_minus1", "mps_w_x_mimic",
+                         "gdp_growth_w_t_minus1", "infl_w_t_minus1",
+                         "credit_gdp_t_minus1", "gov_pca")
+
+# Alternative governance specifications (swap pol_stability for one of these)
+alt_gov_regressors <- list(
+  reg_quality = c("mps_w", "mimic_t_minus1", "mps_w_x_mimic",
+                  "gdp_growth_w_t_minus1", "infl_w_t_minus1",
+                  "credit_gdp_t_minus1", "reg_quality"),
+  corruption  = c("mps_w", "mimic_t_minus1", "mps_w_x_mimic",
+                  "gdp_growth_w_t_minus1", "infl_w_t_minus1",
+                  "credit_gdp_t_minus1", "corruption"),
+  voice_acc   = c("mps_w", "mimic_t_minus1", "mps_w_x_mimic",
+                  "gdp_growth_w_t_minus1", "infl_w_t_minus1",
+                  "credit_gdp_t_minus1", "voice_acc"),
+  pol_stab    = c("mps_w", "mimic_t_minus1", "mps_w_x_mimic",
+                  "gdp_growth_w_t_minus1", "infl_w_t_minus1",
+                  "credit_gdp_t_minus1", "pol_stability")
+)
+
+# ── 3. Define dependent variable and sample configurations ──
+
+# Dependent variables by horizon
+dep_vars <- list(
+  inflation  = paste0("d_infl_w_h", 0:max_horizon),     # Main dep 1 (winsorized)
+  lgdp_pc    = paste0("d_lgdp_pc_h", 0:max_horizon),    # Main dep 2 (raw, log-transformed)
+  gdp_growth = paste0("d_gdp_growth_w_h", 0:max_horizon) # Sideline (winsorized)
+)
+
+# Sample splits
+samples <- list(
+  full      = NULL,                     # No filter — all countries
+  developed = "Developed",              # dev_status == "Developed"
+  emerging  = "Emerging"                # dev_status == "Emerging"
+)
+
+# ── 4. Remove everything except what LP estimation needs ──
+rm(keep_countries)
+
+remaining <- setdiff(ls(), c("df_est", "baseline_regressors",
+                              "alt_gov_regressors", "dep_vars",
+                              "samples", "max_horizon"))
+if (length(remaining) > 0) rm(list = remaining)
+rm(remaining)
+
+# ── 5. Report final state ──
+cat("══════════════════════════════════════════════════════════════════\n")
+cat("  ENVIRONMENT READY FOR LP ESTIMATION\n")
+cat("══════════════════════════════════════════════════════════════════\n\n")
+
+cat("── Objects in environment ──\n")
+for (obj in ls()) {
+  cat(sprintf("  %-25s %s\n", obj, class(get(obj))[1]))
+}
+
+cat("\n── Dataset ──\n")
+cat(sprintf("  df_est: %d rows × %d cols | %d countries | %d years\n",
+            nrow(df_est), ncol(df_est),
+            dplyr::n_distinct(df_est$country),
+            dplyr::n_distinct(df_est$year)))
+
+cat(sprintf("\n── Horizons: 0 to %d ──\n", max_horizon))
+
+cat("\n── Baseline regressors ──\n")
+cat(sprintf("  %s\n", paste(baseline_regressors, collapse = ", ")))
+
+cat("\n── Alternative governance specs ──\n")
+for (name in names(alt_gov_regressors)) {
+  gov_var <- tail(alt_gov_regressors[[name]], 1)
+  cat(sprintf("  %-15s → swap governance PCA for %s\n", name, gov_var))
+}
+
+cat("\n── Dependent variables ──\n")
+for (name in names(dep_vars)) {
+  cat(sprintf("  %-15s → %s ... %s\n", name,
+              dep_vars[[name]][1], tail(dep_vars[[name]], 1)))
+}
+
+cat("\n── Sample splits ──\n")
+for (name in names(samples)) {
+  if (is.null(samples[[name]])) {
+    n <- dplyr::n_distinct(df_est$country)
+    cat(sprintf("  %-15s → all countries (%d)\n", name, n))
+  } else {
+    n <- dplyr::n_distinct(df_est$country[df_est$dev_status == samples[[name]]])
+    cat(sprintf("  %-15s → %s (%d countries)\n", name, samples[[name]], n))
+  }
+}
+
+cat("\n── LP estimation plan: 9 core sets (6 main + 3 sideline) ──\n")
+cat("  A1. Inflation     × Full sample\n")
+cat("  A2. Inflation     × Developed only\n")
+cat("  A3. Inflation     × Emerging only\n")
+cat("  B1. Log GDP p.c.  × Full sample\n")
+cat("  B2. Log GDP p.c.  × Developed only\n")
+cat("  B3. Log GDP p.c.  × Emerging only\n")
+cat("  C1. GDP growth    × Full sample     (sideline)\n")
+cat("  C2. GDP growth    × Developed only  (sideline)\n")
+cat("  C3. GDP growth    × Emerging only   (sideline)\n")
+cat("  + 4 alternative governance specs for main deps (robustness)\n")
+
+cat("══════════════════════════════════════════════════════════════════\n")
+
+```
+
+
+```{r}
+#| label: LP Estimation — Helper Function
+#| output: false
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LOCAL PROJECTIONS — HELPER FUNCTION
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# PURPOSE:
+# This function estimates the panel local projections model (Jordà 2005)
+# for a given dependent variable prefix, sample, and set of regressors
+# across all horizons h = 0, ..., max_horizon.
+#
+# MODEL (for each horizon h):
+#   d_Y_h = α_i + λ_t + β·MPS + γ·MIMIC + δ·(MPS×MIMIC) + θ'X + ε
+#
+# where:
+#   α_i = country fixed effects (absorb time-invariant country characteristics)
+#   λ_t = year fixed effects (absorb global shocks common to all countries)
+#   δ   = coefficient of interest — how informality moderates monetary transmission
+#   SEs clustered at the country level (accounts for serial correlation within countries)
+#
+# RETURNS:
+# A tidy dataframe with one row per horizon, containing the coefficient
+# estimates, standard errors, confidence intervals, and sample sizes for
+# all regressors — designed for easy IRF plotting.
+# ══════════════════════════════════════════════════════════════════════════════
+
+run_lp <- function(data, dep_prefix, regressors, horizons = 0:max_horizon,
+                   spec_label = "baseline", sample_label = "full") {
+
+  results <- list()
+
+  for (h in horizons) {
+    dep_var <- paste0(dep_prefix, h)
+
+    # Skip if dependent variable doesn't exist
+    if (!dep_var %in% names(data)) {
+      warning(paste("Variable", dep_var, "not found — skipping horizon", h))
+      next
+    }
+
+    # Build formula: dep_var ~ regressors | country + year
+    fml <- as.formula(paste(dep_var, "~",
+                            paste(regressors, collapse = " + "),
+                            "| country + year"))
+
+    # Estimate with country-clustered SEs
+    fit <- tryCatch({
+      feols(fml, data = data, cluster = "country")
+    }, error = function(e) {
+      warning(paste("Horizon", h, "failed:", conditionMessage(e)))
+      return(NULL)
+    })
+
+    if (is.null(fit)) next
+
+    # Extract coefficients into tidy format
+    coef_table <- as.data.frame(coeftable(fit))
+    coef_table$variable <- rownames(coef_table)
+    rownames(coef_table) <- NULL
+
+    coef_table <- coef_table %>%
+      rename(
+        estimate = Estimate,
+        std_error = `Std. Error`,
+        t_value = `t value`,
+        p_value = `Pr(>|t|)`
+      ) %>%
+      mutate(
+        horizon      = h,
+        ci_lower_90  = estimate - 1.645 * std_error,
+        ci_upper_90  = estimate + 1.645 * std_error,
+        ci_lower_95  = estimate - 1.96 * std_error,
+        ci_upper_95  = estimate + 1.96 * std_error,
+        n_obs        = fit$nobs,
+        n_countries  = length(unique(fit$fixef_sizes)),
+        spec         = spec_label,
+        sample       = sample_label,
+        dep_var_type = dep_prefix
+      )
+
+    results[[as.character(h)]] <- coef_table
+  }
+
+  bind_rows(results)
+}
+
+```
+
+
+```{r}
+#| label: Quick LP test
+#| output: true
+
+# Quick test: one regression at h = 0 to verify feols works
+test_fml <- d_infl_w_h0 ~ mps_w + mimic_t_minus1 + mps_w_x_mimic +
+            gdp_growth_w_t_minus1 + credit_gdp_t_minus1 + gov_pca | country + year
+
+test_fit <- feols(test_fml, data = df_est, cluster = "country")
+summary(test_fit)
+
+rm(test_fml, test_fit)
+
+# Works!
+
+```
+
+```{r}
+#| label: LP Estimation — Part A Inflation Response
+#| output: true
+#| warning: false
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PART A — INFLATION RESPONSE TO MONETARY POLICY SHOCKS
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Dependent variable: d_infl_w_h{h} = π_{i,t+h} − π_{i,t−1}
+#   (cumulative change in winsorized inflation from pre-shock baseline)
+#
+# Baseline specification:
+#   d_infl_w_h = mps_w + mimic_t_minus1 + mps_w_x_mimic
+#              + gdp_growth_w_t_minus1 + credit_gdp_t_minus1 + gov_pca
+#              | country + year
+#
+# Note: lagged inflation is NOT included as a control because the
+# dependent variable is already defined relative to infl_{t-1}.
+#
+# Estimated for 3 samples: Full, Developed, Emerging
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Define inflation-specific regressors
+infl_regressors <- c("mps_w", "mimic_t_minus1", "mps_w_x_mimic",
+                     "gdp_growth_w_t_minus1", "credit_gdp_t_minus1", "gov_pca")
+
+# ── A1: Full sample ──
+cat("Running Part A1: Inflation × Full sample...\n")
+lp_infl_full <- run_lp(df_est, "d_infl_w_h", infl_regressors,
+                        spec_label = "baseline", sample_label = "full")
+
+# ── A2: Developed only ──
+cat("Running Part A2: Inflation × Developed...\n")
+lp_infl_dev <- run_lp(df_est %>% filter(dev_status == "Developed"),
+                       "d_infl_w_h", infl_regressors,
+                       spec_label = "baseline", sample_label = "developed")
+
+# ── A3: Emerging only ──
+cat("Running Part A3: Inflation × Emerging...\n")
+lp_infl_emg <- run_lp(df_est %>% filter(dev_status == "Emerging"),
+                       "d_infl_w_h", infl_regressors,
+                       spec_label = "baseline", sample_label = "emerging")
+
+# Combine all inflation results
+lp_inflation <- bind_rows(lp_infl_full, lp_infl_dev, lp_infl_emg)
+rm(lp_infl_full, lp_infl_dev, lp_infl_emg)
+
+# ── Report key coefficient: δ_h (interaction MPS × MIMIC) ──
+cat("\n══════════════════════════════════════════════════════════════════\n")
+cat("  PART A — INFLATION: MPS × MIMIC INTERACTION (δ_h)\n")
+cat("──────────────────────────────────────────────────────────────────\n")
+cat("  δ > 0 → informality dampens inflation response to monetary shock\n")
+cat("══════════════════════════════════════════════════════════════════\n\n")
+
+interaction_infl <- lp_inflation %>%
+  filter(variable == "mps_w_x_mimic") %>%
+  select(sample, horizon, estimate, std_error, p_value, ci_lower_95, ci_upper_95, n_obs)
+
+interaction_infl$estimate     <- round(interaction_infl$estimate, 4)
+interaction_infl$std_error    <- round(interaction_infl$std_error, 4)
+interaction_infl$p_value      <- round(interaction_infl$p_value, 3)
+interaction_infl$ci_lower_95  <- round(interaction_infl$ci_lower_95, 4)
+interaction_infl$ci_upper_95  <- round(interaction_infl$ci_upper_95, 4)
+
+print(as.data.frame(interaction_infl), row.names = FALSE)
+
+```
+
+
+```{r}
+#| label: LP Estimation — Part B Log GDP per Capita Response
+#| output: true
+#| warning: false
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PART B — LOG GDP PER CAPITA RESPONSE TO MONETARY POLICY SHOCKS (MAIN)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Dependent variable: d_lgdp_pc_h{h} = log(gdp_pc_{i,t+h}) − log(gdp_pc_{i,t−1})
+#   (cumulative log-change in GDP per capita from pre-shock baseline)
+#
+# Baseline specification:
+#   d_lgdp_pc_h = mps_w + mimic_t_minus1 + mps_w_x_mimic
+#               + infl_w_t_minus1 + credit_gdp_t_minus1 + gov_pca
+#               | country + year
+#
+# Note: log(gdp_pc) is NOT winsorized — the log transformation already
+# dampens extreme values. Lagged inflation is included as a cross-variable
+# control. GDP growth is NOT included (collinear with log GDP changes).
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Define log GDP p.c. specific regressors
+lgdp_pc_regressors <- c("mps_w", "mimic_t_minus1", "mps_w_x_mimic",
+                         "infl_w_t_minus1", "credit_gdp_t_minus1", "gov_pca")
+
+# ── B1: Full sample ──
+cat("Running Part B1: Log GDP p.c. × Full sample...\n")
+lp_lgdp_full <- run_lp(df_est, "d_lgdp_pc_h", lgdp_pc_regressors,
+                        spec_label = "baseline", sample_label = "full")
+
+# ── B2: Developed only ──
+cat("Running Part B2: Log GDP p.c. × Developed...\n")
+lp_lgdp_dev <- run_lp(df_est %>% filter(dev_status == "Developed"),
+                       "d_lgdp_pc_h", lgdp_pc_regressors,
+                       spec_label = "baseline", sample_label = "developed")
+
+# ── B3: Emerging only ──
+cat("Running Part B3: Log GDP p.c. × Emerging...\n")
+lp_lgdp_emg <- run_lp(df_est %>% filter(dev_status == "Emerging"),
+                       "d_lgdp_pc_h", lgdp_pc_regressors,
+                       spec_label = "baseline", sample_label = "emerging")
+
+# Combine all log GDP p.c. results
+lp_lgdp_pc <- bind_rows(lp_lgdp_full, lp_lgdp_dev, lp_lgdp_emg)
+rm(lp_lgdp_full, lp_lgdp_dev, lp_lgdp_emg)
+
+# ── Report key coefficient: δ_h (interaction MPS × MIMIC) ──
+cat("\n══════════════════════════════════════════════════════════════════\n")
+cat("  PART B — LOG GDP PER CAPITA: MPS × MIMIC INTERACTION (δ_h)\n")
+cat("──────────────────────────────────────────────────────────────────\n")
+cat("  δ > 0 → informality dampens output response to monetary shock\n")
+cat("══════════════════════════════════════════════════════════════════\n\n")
+
+interaction_lgdp <- lp_lgdp_pc %>%
+  filter(variable == "mps_w_x_mimic") %>%
+  select(sample, horizon, estimate, std_error, p_value, ci_lower_95, ci_upper_95, n_obs)
+
+interaction_lgdp$estimate     <- round(interaction_lgdp$estimate, 4)
+interaction_lgdp$std_error    <- round(interaction_lgdp$std_error, 4)
+interaction_lgdp$p_value      <- round(interaction_lgdp$p_value, 3)
+interaction_lgdp$ci_lower_95  <- round(interaction_lgdp$ci_lower_95, 4)
+interaction_lgdp$ci_upper_95  <- round(interaction_lgdp$ci_upper_95, 4)
+
+print(as.data.frame(interaction_lgdp), row.names = FALSE)
+
+```
+```{r}
+#| label: LP Estimation — Part C GDP Growth Response (Sideline)
+#| output: true
+#| warning: false
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PART C — GDP GROWTH RESPONSE (SIDELINE / SUPPLEMENTARY)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Dependent variable: d_gdp_growth_w_h{h} = gdp_growth_{i,t+h} − gdp_growth_{i,t−1}
+#   (cumulative change in winsorized GDP growth rate)
+#
+# This is a supplementary analysis — the main output response is captured
+# by log GDP per capita in Part B. GDP growth is kept for completeness
+# and in case the paper needs to discuss growth rate dynamics separately.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Define GDP growth specific regressors
+gdp_growth_regressors <- c("mps_w", "mimic_t_minus1", "mps_w_x_mimic",
+                           "infl_w_t_minus1", "credit_gdp_t_minus1", "gov_pca")
+
+# ── C1: Full sample ──
+cat("Running Part C1: GDP growth × Full sample (sideline)...\n")
+lp_gdpgr_full <- run_lp(df_est, "d_gdp_growth_w_h", gdp_growth_regressors,
+                         spec_label = "baseline", sample_label = "full")
+
+# ── C2: Developed only ──
+cat("Running Part C2: GDP growth × Developed (sideline)...\n")
+lp_gdpgr_dev <- run_lp(df_est %>% filter(dev_status == "Developed"),
+                        "d_gdp_growth_w_h", gdp_growth_regressors,
+                        spec_label = "baseline", sample_label = "developed")
+
+# ── C3: Emerging only ──
+cat("Running Part C3: GDP growth × Emerging (sideline)...\n")
+lp_gdpgr_emg <- run_lp(df_est %>% filter(dev_status == "Emerging"),
+                        "d_gdp_growth_w_h", gdp_growth_regressors,
+                        spec_label = "baseline", sample_label = "emerging")
+
+
+# Combine all GDP growth results
+lp_gdp_growth <- bind_rows(lp_gdpgr_full, lp_gdpgr_dev, lp_gdpgr_emg)
+rm(lp_gdpgr_full, lp_gdpgr_dev, lp_gdpgr_emg, gdp_growth_regressors)
+
+cat("\n── GDP growth sideline estimation complete ──\n")
+
+
+# ── Report key coefficient: δ_h (interaction MPS × MIMIC) ──
+cat("\n══════════════════════════════════════════════════════════════════\n")
+cat("  PART C — GDP GROWTH RESPONS: MPS × MIMIC INTERACTION (δ_h)\n")
+cat("──────────────────────────────────────────────────────────────────\n")
+cat("  δ > 0 → informality dampens output growth response to monetary shock\n")
+cat("══════════════════════════════════════════════════════════════════\n\n")
+
+interaction_gdp_growth <- lp_gdp_growth %>%
+  filter(variable == "mps_w_x_mimic") %>%
+  select(sample, horizon, estimate, std_error, p_value, ci_lower_95, ci_upper_95, n_obs)
+
+interaction_gdp_growth$estimate     <- round(interaction_gdp_growth$estimate, 4)
+interaction_gdp_growth$std_error    <- round(interaction_gdp_growth$std_error, 4)
+interaction_gdp_growth$p_value      <- round(interaction_gdp_growth$p_value, 3)
+interaction_gdp_growth$ci_lower_95  <- round(interaction_gdp_growth$ci_lower_95, 4)
+interaction_gdp_growth$ci_upper_95  <- round(interaction_gdp_growth$ci_upper_95, 4)
+
+print(as.data.frame(interaction_gdp_growth), row.names = FALSE)
+
+```
+
+```{r}
+#| label: LP Estimation — Robustness Alternative Governance Specs
+#| output: true
+#| warning: false
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ROBUSTNESS — ALTERNATIVE GOVERNANCE SPECIFICATIONS
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# The baseline uses gov_pca as the governance control. Here we re-estimate
+# the full-sample models swapping gov_pca for each individual governance
+# variable to verify that δ_h (MPS × MIMIC) is not sensitive to the choice.
+#
+# Alternatives: reg_quality, corruption, voice_acc, pol_stability
+# Run on full sample only (subsample robustness is secondary).
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Define alternative governance specs for INFLATION
+alt_gov_infl <- list(
+  reg_quality  = c("mps_w", "mimic_t_minus1", "mps_w_x_mimic",
+                   "gdp_growth_w_t_minus1", "credit_gdp_t_minus1", "reg_quality"),
+  corruption   = c("mps_w", "mimic_t_minus1", "mps_w_x_mimic",
+                   "gdp_growth_w_t_minus1", "credit_gdp_t_minus1", "corruption"),
+  voice_acc    = c("mps_w", "mimic_t_minus1", "mps_w_x_mimic",
+                   "gdp_growth_w_t_minus1", "credit_gdp_t_minus1", "voice_acc"),
+  pol_stability = c("mps_w", "mimic_t_minus1", "mps_w_x_mimic",
+                   "gdp_growth_w_t_minus1", "credit_gdp_t_minus1", "pol_stability")
+)
+
+# Define alternative governance specs for log GDP p.c.
+alt_gov_lgdp <- list(
+  reg_quality  = c("mps_w", "mimic_t_minus1", "mps_w_x_mimic",
+                   "infl_w_t_minus1", "credit_gdp_t_minus1", "reg_quality"),
+  corruption   = c("mps_w", "mimic_t_minus1", "mps_w_x_mimic",
+                   "infl_w_t_minus1", "credit_gdp_t_minus1", "corruption"),
+  voice_acc    = c("mps_w", "mimic_t_minus1", "mps_w_x_mimic",
+                   "infl_w_t_minus1", "credit_gdp_t_minus1", "voice_acc"),
+  pol_stability = c("mps_w", "mimic_t_minus1", "mps_w_x_mimic",
+                   "infl_w_t_minus1", "credit_gdp_t_minus1", "pol_stability")
+)
+
+# Run all alternative governance specs on full sample
+lp_robustness <- list()
+
+for (gov_name in names(alt_gov_infl)) {
+  cat(sprintf("Running robustness: Inflation × %s...\n", gov_name))
+  lp_robustness[[paste0("infl_", gov_name)]] <-
+    run_lp(df_est, "d_infl_w_h", alt_gov_infl[[gov_name]],
+           spec_label = gov_name, sample_label = "full")
+}
+
+for (gov_name in names(alt_gov_lgdp)) {
+  cat(sprintf("Running robustness: Log GDP p.c. × %s...\n", gov_name))
+  lp_robustness[[paste0("lgdp_", gov_name)]] <-
+    run_lp(df_est, "d_lgdp_pc_h", alt_gov_lgdp[[gov_name]],
+           spec_label = gov_name, sample_label = "full")
+}
+
+lp_robust <- bind_rows(lp_robustness)
+rm(lp_robustness)
+
+# ── Compare δ_h across governance specs ──
+cat("\n══════════════════════════════════════════════════════════════════\n")
+cat("  ROBUSTNESS — MPS × MIMIC (δ_h) ACROSS GOVERNANCE SPECS\n")
+cat("──────────────────────────────────────────────────────────────────\n")
+cat("  Stable δ_h across specs → result is not driven by governance choice\n")
+cat("══════════════════════════════════════════════════════════════════\n")
+
+cat("\n── Inflation models ──\n")
+lp_robust %>%
+  filter(variable == "mps_w_x_mimic", grepl("^infl_", dep_var_type) | dep_var_type == "d_infl_w_h") %>%
+  select(spec, horizon, estimate, p_value) %>%
+  mutate(estimate = round(estimate, 4), p_value = round(p_value, 3)) %>%
+  pivot_wider(names_from = horizon, values_from = c(estimate, p_value),
+              names_glue = "h{horizon}_{.value}") %>%
+  print()
+
+cat("\n── Log GDP per capita models ──\n")
+lp_robust %>%
+  filter(variable == "mps_w_x_mimic", grepl("^lgdp_", dep_var_type) | dep_var_type == "d_lgdp_pc_h") %>%
+  select(spec, horizon, estimate, p_value) %>%
+  mutate(estimate = round(estimate, 4), p_value = round(p_value, 3)) %>%
+  pivot_wider(names_from = horizon, values_from = c(estimate, p_value),
+              names_glue = "h{horizon}_{.value}") %>%
+  print()
+
+# Clean up spec vectors
+rm(alt_gov_infl, alt_gov_lgdp, infl_regressors, lgdp_pc_regressors, gov_name)
+
+```
+
+
+```{r}
+#| label: LP Results — Combine All Results
+#| output: true
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COMBINE ALL LP RESULTS INTO A SINGLE MASTER DATAFRAME
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# lp_all contains every estimated coefficient from:
+#   - 6 baseline models (2 dep vars × 3 samples)
+#   - 8 robustness models (2 dep vars × 4 alternative governance specs)
+#
+# This is the single object used for all subsequent IRF plotting and
+# results tables. Filter by variable, sample, spec, and dep_var_type
+# to extract what you need.
+# ══════════════════════════════════════════════════════════════════════════════
+
+lp_all <- bind_rows(
+  lp_inflation %>% mutate(dep_var_type = "inflation"),
+  lp_lgdp_pc %>% mutate(dep_var_type = "lgdp_pc"),
+  lp_gdp_growth %>% mutate(dep_var_type = "gdp_growth"),
+  lp_robust
+)
+
+cat("══════════════════════════════════════════════════════════════════\n")
+cat("  ALL LP RESULTS COMBINED: lp_all\n")
+cat("──────────────────────────────────────────────────────────────────\n")
+cat(sprintf("  Total coefficient rows: %d\n", nrow(lp_all)))
+cat(sprintf("  Unique specs:           %s\n", paste(unique(lp_all$spec), collapse = ", ")))
+cat(sprintf("  Unique samples:         %s\n", paste(unique(lp_all$sample), collapse = ", ")))
+cat(sprintf("  Unique dep var types:   %s\n", paste(unique(lp_all$dep_var_type), collapse = ", ")))
+cat("══════════════════════════════════════════════════════════════════\n")
+
+# Clean up intermediate objects — keep only lp_all for plotting
+rm(lp_inflation, lp_lgdp_pc, lp_gdp_growth, lp_robust)
+
+```
+
+
+```{r}
+#| label: IRF Plots — PART A Inflation Response (Baseline)
+#| output: true
+#| fig-width: 12
+#| fig-height: 5
+
+# ══════════════════════════════════════════════════════════════════════════════
+# IMPULSE RESPONSE FUNCTIONS — INFLATION
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# These plots show the estimated δ_h (coefficient on MPS × MIMIC) across
+# horizons h = 0, ..., 5 with 90% and 95% confidence bands.
+#
+# Interpretation (Jordà 2005):
+#   Each point is the coefficient from a SEPARATE regression at horizon h.
+#   The sequence of coefficients traces out the impulse response function.
+#
+#   δ_h > 0 → higher informality DAMPENS the inflation response to MPS
+#   δ_h < 0 → higher informality AMPLIFIES the inflation response
+#   δ_h ≈ 0 → informality doesn't moderate monetary transmission
+#   Bands excluding zero → statistically significant at that confidence level
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Extract the interaction coefficient across horizons for each sample
+irf_infl <- lp_all %>%
+  filter(variable == "mps_w_x_mimic",
+         dep_var_type == "inflation",
+         spec == "baseline")
+
+# Set sample as ordered factor for faceting
+irf_infl$sample <- factor(irf_infl$sample,
+                          levels = c("full", "developed", "emerging"),
+                          labels = c("Full Sample", "Developed", "Emerging"))
+
+ggplot(irf_infl, aes(x = horizon, y = estimate)) +
+  # 95% CI band (lighter)
+  geom_ribbon(aes(ymin = ci_lower_95, ymax = ci_upper_95),
+              fill = "#2C7FB8", alpha = 0.15) +
+  # 90% CI band (darker)
+  geom_ribbon(aes(ymin = ci_lower_90, ymax = ci_upper_90),
+              fill = "#2C7FB8", alpha = 0.25) +
+  # Point estimates
+  geom_line(color = "#2C7FB8", linewidth = 0.8) +
+  geom_point(color = "#2C7FB8", size = 2.5) +
+  geom_text(aes(label = round(estimate, 3)), nudge_y = 0.02, size = 3.5, family = "serif") +
+  # Zero reference line
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  # Facet by sample
+  facet_wrap(~ sample, ncol = 3) +
+  scale_x_continuous(breaks = 0:max_horizon) +
+  labs(
+    title = "Impulse Response: Effect of MPS × Informality on Inflation",
+    subtitle = expression(paste(delta[h], " from: ", Delta, pi[t+h],
+                                " = ", alpha[i], " + ", lambda[t],
+                                " + ", beta, "·MPS + ", gamma, "·MIMIC + ",
+                                delta, "·(MPS×MIMIC) + ", theta, "'X + ", epsilon)),
+    x = "Horizon (years)",
+    y = expression(hat(delta)[h]),
+    caption = "Shaded areas: 90% (dark) and 95% (light) confidence intervals. Country-clustered SEs."
+  ) +
+  theme_minimal(base_size = 12, base_family = "serif") +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10, color = "grey30")
+  )
+
+```
+```{r}
+#| label: IRF Plots — PART B Log GDP per Capita Response (Baseline)
+#| output: true
+#| fig-width: 12
+#| fig-height: 5
+
+# ══════════════════════════════════════════════════════════════════════════════
+# IMPULSE RESPONSE FUNCTIONS — GDP GROWTH
+# ══════════════════════════════════════════════════════════════════════════════
+
+#   δ_h > 0 → higher informality DAMPENS output (GDP) response to monetary shock
+#   δ_h < 0 → higher informality AMPLIFIES output (GDP) response to monetary shock
+
+
+irf_lgdp <- lp_all %>%
+  filter(variable == "mps_w_x_mimic",
+         dep_var_type == "lgdp_pc",
+         spec == "baseline")
+
+irf_lgdp$sample <- factor(irf_lgdp$sample,
+                          levels = c("full", "developed", "emerging"),
+                          labels = c("Full Sample", "Developed", "Emerging"))
+
+ggplot(irf_lgdp, aes(x = horizon, y = estimate)) +
+  geom_ribbon(aes(ymin = ci_lower_95, ymax = ci_upper_95),
+              fill = "#D95F02", alpha = 0.15) +
+  geom_ribbon(aes(ymin = ci_lower_90, ymax = ci_upper_90),
+              fill = "#D95F02", alpha = 0.25) +
+  geom_line(color = "#D95F02", linewidth = 0.8) +
+  geom_point(color = "#D95F02", size = 2.5) +
+  geom_text(aes(label = round(estimate, 5)), nudge_y = 0.002, size = 3.5, family = "serif") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  facet_wrap(~ sample, ncol = 3) +
+  scale_x_continuous(breaks = 0:max_horizon) +
+  labs(
+    title = "Impulse Response: Effect of MPS × Informality on Log GDP per Capita",
+    subtitle = expression(paste(delta[h], " from: ", Delta, "log(gdp_pc)"[t+h],
+                                " = ", alpha[i], " + ", lambda[t],
+                                " + ", beta, "·MPS + ", gamma, "·MIMIC + ",
+                                delta, "·(MPS×MIMIC) + ", theta, "'X + ", epsilon)),
+    x = "Horizon (years)",
+    y = expression(hat(delta)[h]),
+    caption = "Shaded areas: 90% (dark) and 95% (light) confidence intervals. Country-clustered SEs."
+  ) +
+  theme_minimal(base_size = 12, base_family = "serif") +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10, color = "grey30")
+  )
+
+```
+
+
+```{r}
+#| label: IRF Plots — PART C GDP Growth Response (Baseline)
+#| output: true
+#| fig-width: 12
+#| fig-height: 5
+
+# ══════════════════════════════════════════════════════════════════════════════
+# IMPULSE RESPONSE FUNCTIONS — GDP GROWTH
+# ══════════════════════════════════════════════════════════════════════════════
+
+#   δ_h > 0 → higher informality DAMPENS the output (GDP) growth response to MPS
+#   δ_h < 0 → higher informality AMPLIFIES the output (GDP) growth response
+
+
+irf_gdp_growth <- lp_all %>%
+  filter(variable == "mps_w_x_mimic",
+         dep_var_type == "gdp_growth",
+         spec == "baseline")
+
+irf_gdp_growth$sample <- factor(irf_gdp_growth$sample,
+                         levels = c("full", "developed", "emerging"),
+                         labels = c("Full Sample", "Developed", "Emerging"))
+
+ggplot(irf_gdp_growth, aes(x = horizon, y = estimate)) +
+  geom_ribbon(aes(ymin = ci_lower_95, ymax = ci_upper_95),
+              fill = "#66A61E", alpha = 0.15) +
+  geom_ribbon(aes(ymin = ci_lower_90, ymax = ci_upper_90),
+              fill = "#66A61E", alpha = 0.25) +
+  geom_line(color = "#66A61E", linewidth = 0.8) +
+  geom_point(color = "#66A61E", size = 2.5) +
+  geom_text(aes(label = round(estimate, 3)), nudge_y = 0.04, size = 3.5, family = "serif") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  facet_wrap(~ sample, ncol = 3) +
+  scale_x_continuous(breaks = 0:max_horizon) +
+  labs(
+    title = "Impulse Response: Effect of MPS × Informality on GDP Growth",
+    subtitle = expression(paste(delta[h], " from: ", Delta, y[t+h],
+                                " = ", alpha[i], " + ", lambda[t],
+                                " + ", beta, "·MPS + ", gamma, "·MIMIC + ",
+                                delta, "·(MPS×MIMIC) + ", theta, "'X + ", epsilon)),
+    x = "Horizon (years)",
+    y = expression(hat(delta)[h]),
+    caption = "Shaded areas: 90% (dark) and 95% (light) confidence intervals. Country-clustered SEs."
+  ) +
+  theme_minimal(base_size = 12, base_family = "serif") +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10, color = "grey30")
+  )
+
+```
+
+
+```{r}
+#| label: IRF Plots — Robustness Comparison (Governance Alternatives)
+#| output: true
+#| fig-width: 12
+#| fig-height: 10
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ROBUSTNESS IRF — δ_h ACROSS ALTERNATIVE GOVERNANCE SPECIFICATIONS
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# If the interaction coefficient δ_h is stable across different governance
+# controls, the result is robust to the "which governance variable?" choice.
+# Each line is a different governance specification; all on full sample.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Combine baseline (full sample) with robustness specs
+irf_robust <- bind_rows(
+  lp_all %>%
+    filter(variable == "mps_w_x_mimic", spec == "baseline", sample == "full") %>%
+    mutate(gov_spec = "gov_pca (baseline)"),
+  lp_all %>%
+    filter(variable == "mps_w_x_mimic", spec != "baseline", sample == "full") %>%
+    mutate(gov_spec = spec)
+)
+
+# Separate by dep var type — main dependents only
+irf_robust <- irf_robust %>%
+  filter(dep_var_type %in% c("inflation", "lgdp_pc", "d_infl_w_h", "d_lgdp_pc_h")) %>%
+  mutate(dep_label = case_when(
+    grepl("infl", dep_var_type) ~ "Inflation",
+    grepl("lgdp", dep_var_type) ~ "Log GDP per Capita",
+    TRUE ~ dep_var_type
+  ))
+
+ggplot(irf_robust, aes(x = horizon, y = estimate, color = gov_spec)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  facet_wrap(~ dep_label, ncol = 1, scales = "free_y") +
+  scale_x_continuous(breaks = 0:max_horizon) +
+  scale_color_manual(
+    values = c("gov_pca (baseline)" = "#2C7FB8",
+               "reg_quality" = "#E7298A",
+               "corruption" = "#66A61E",
+               "voice_acc" = "#E6AB02",
+               "pol_stability" = "#7570B3"),
+    name = "Governance control"
+  ) +
+  labs(
+    title = expression(paste("Robustness: ", delta[h], " (MPS × MIMIC) Across Governance Specifications")),
+    subtitle = "Full sample only. Stable trajectories -> result not driven by governance choice.",
+    x = "Horizon (years)",
+    y = expression(hat(delta)[h])
+  ) +
+  theme_minimal(base_size = 12, base_family = "serif") +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 12)
+  )
+
+```
+
+```{r}
+#| label: IRF Plots — PART A Inflation MPS Direct Effect (β_h)
+#| output: true
+#| fig-width: 12
+#| fig-height: 5
+
+# ══════════════════════════════════════════════════════════════════════════════
+# IRF — DIRECT EFFECT OF MPS ON INFLATION (β_h)
+# ══════════════════════════════════════════════════════════════════════════════
+# β_h captures the direct effect of a monetary policy shock on inflation,
+# holding informality constant. This is the "average" transmission effect
+# across all levels of informality.
+#   β_h < 0 → contractionary MPS reduces inflation (expected)
+#   β_h > 0 → contractionary MPS increases inflation ("price puzzle")
+# ══════════════════════════════════════════════════════════════════════════════
+
+irf_infl_beta <- lp_all %>%
+  filter(variable == "mps_w",
+         dep_var_type == "inflation",
+         spec == "baseline")
+
+irf_infl_beta$sample <- factor(irf_infl_beta$sample,
+                               levels = c("full", "developed", "emerging"),
+                               labels = c("Full Sample", "Developed", "Emerging"))
+
+ggplot(irf_infl_beta, aes(x = horizon, y = estimate)) +
+  geom_ribbon(aes(ymin = ci_lower_95, ymax = ci_upper_95),
+              fill = "#2C7FB8", alpha = 0.15) +
+  geom_ribbon(aes(ymin = ci_lower_90, ymax = ci_upper_90),
+              fill = "#2C7FB8", alpha = 0.25) +
+  geom_line(color = "#2C7FB8", linewidth = 0.8) +
+  geom_point(color = "#2C7FB8", size = 2.5) +
+  geom_text(aes(label = round(estimate, 3)), nudge_y = 0.35, size = 3.5, family = "serif") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  facet_wrap(~ sample, ncol = 3) +
+  scale_x_continuous(breaks = 0:max_horizon) +
+  labs(
+    title = "Impulse Response: Direct Effect of MPS on Inflation",
+    subtitle = expression(paste(beta[h], " (coefficient on MPS) from the baseline LP specification")),
+    x = "Horizon (years)",
+    y = expression(hat(beta)[h]),
+    caption = "Shaded areas: 90% (dark) and 95% (light) confidence intervals. Country-clustered SEs."
+  ) +
+  theme_minimal(base_size = 12, base_family = "serif") +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10, color = "grey30")
+  )
+
+```
+
+```{r}
+#| label: IRF Plots — PART B Log GDP p.c. MPS Direct Effect (β_h)
+#| output: true
+#| fig-width: 12
+#| fig-height: 5
+
+# ══════════════════════════════════════════════════════════════════════════════
+# IRF — DIRECT EFFECT OF MPS ON LOG GDP PER CAPITA (β_h)
+# ══════════════════════════════════════════════════════════════════════════════
+# β_h captures the direct effect of a monetary policy shock on log GDP p.c.
+#   β_h < 0 → contractionary MPS reduces output (expected)
+#   β_h > 0 → contractionary MPS increases output (unusual)
+# ══════════════════════════════════════════════════════════════════════════════
+
+irf_lgdp_beta <- lp_all %>%
+  filter(variable == "mps_w",
+         dep_var_type == "lgdp_pc",
+         spec == "baseline")
+
+irf_lgdp_beta$sample <- factor(irf_lgdp_beta$sample,
+                               levels = c("full", "developed", "emerging"),
+                               labels = c("Full Sample", "Developed", "Emerging"))
+
+ggplot(irf_lgdp_beta, aes(x = horizon, y = estimate)) +
+  geom_ribbon(aes(ymin = ci_lower_95, ymax = ci_upper_95),
+              fill = "#D95F02", alpha = 0.15) +
+  geom_ribbon(aes(ymin = ci_lower_90, ymax = ci_upper_90),
+              fill = "#D95F02", alpha = 0.25) +
+  geom_line(color = "#D95F02", linewidth = 0.8) +
+  geom_point(color = "#D95F02", size = 2.5) +
+  geom_text(aes(label = round(estimate, 3)), nudge_y = 0.03, size = 3.5, family = "serif") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  facet_wrap(~ sample, ncol = 3) +
+  scale_x_continuous(breaks = 0:max_horizon) +
+  labs(
+    title = "Impulse Response: Direct Effect of MPS on Log GDP per Capita",
+    subtitle = expression(paste(beta[h], " (coefficient on MPS) from the baseline LP specification")),
+    x = "Horizon (years)",
+    y = expression(hat(beta)[h]),
+    caption = "Shaded areas: 90% (dark) and 95% (light) confidence intervals. Country-clustered SEs."
+  ) +
+  theme_minimal(base_size = 12, base_family = "serif") +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10, color = "grey30")
+  )
+
+```
+
+```{r}
+#| label: IRF Plots — PART C GDP Growth MPS Direct Effect (β_h)
+#| output: true
+#| fig-width: 12
+#| fig-height: 5
+
+# ══════════════════════════════════════════════════════════════════════════════
+# IRF — DIRECT EFFECT OF MPS ON GDP GROWTH (β_h) — SIDELINE
+# ══════════════════════════════════════════════════════════════════════════════
+# β_h captures the direct effect of a monetary policy shock on GDP growth.
+#   β_h < 0 → contractionary MPS reduces growth (expected)
+#   β_h > 0 → contractionary MPS increases growth (unusual)
+# ══════════════════════════════════════════════════════════════════════════════
+
+irf_gdpgr_beta <- lp_all %>%
+  filter(variable == "mps_w",
+         dep_var_type == "gdp_growth",
+         spec == "baseline")
+
+irf_gdpgr_beta$sample <- factor(irf_gdpgr_beta$sample,
+                                levels = c("full", "developed", "emerging"),
+                                labels = c("Full Sample", "Developed", "Emerging"))
+
+ggplot(irf_gdpgr_beta, aes(x = horizon, y = estimate)) +
+  geom_ribbon(aes(ymin = ci_lower_95, ymax = ci_upper_95),
+              fill = "#66A61E", alpha = 0.15) +
+  geom_ribbon(aes(ymin = ci_lower_90, ymax = ci_upper_90),
+              fill = "#66A61E", alpha = 0.25) +
+  geom_line(color = "#66A61E", linewidth = 0.8) +
+  geom_point(color = "#66A61E", size = 2.5) +
+  geom_text(aes(label = round(estimate, 3)), nudge_y = 0.65, size = 3.5, family = "serif") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  facet_wrap(~ sample, ncol = 3) +
+  scale_x_continuous(breaks = 0:max_horizon) +
+  labs(
+    title = "Impulse Response: Direct Effect of MPS on GDP Growth (Sideline)",
+    subtitle = expression(paste(beta[h], " (coefficient on MPS) from the baseline LP specification")),
+    x = "Horizon (years)",
+    y = expression(hat(beta)[h]),
+    caption = "Shaded areas: 90% (dark) and 95% (light) confidence intervals. Country-clustered SEs."
+  ) +
+  theme_minimal(base_size = 12, base_family = "serif") +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10, color = "grey30")
+  )
+
+```
+
+```{r}
+#| label: IRF Plots — PART A Inflation MIMIC Direct Effect (γ_h)
+#| output: true
+#| fig-width: 12
+#| fig-height: 5
+
+# ══════════════════════════════════════════════════════════════════════════════
+# IRF — DIRECT EFFECT OF MIMIC ON INFLATION (γ_h)
+# ══════════════════════════════════════════════════════════════════════════════
+# γ_h captures the direct association between lagged informality (MIMIC_{t-1})
+# and inflation, holding MPS and the interaction constant. This is the "level"
+# effect of the informal economy on price dynamics — separate from how it
+# moderates monetary transmission (δ_h).
+#
+#   γ_h > 0 → higher informality is associated with stronger inflation
+#   γ_h < 0 → higher informality is associated with weaker inflation
+#
+# CAVEAT: Diagnostic 3 showed MIMIC is 99.6% between-country. Country FE absorb
+# most of that variation, so γ_h is identified off small within-country
+# movements and is expected to be imprecise. The interaction δ_h remains the
+# core parameter of interest.
+# ══════════════════════════════════════════════════════════════════════════════
+
+irf_infl_gamma <- lp_all %>%
+  filter(variable == "mimic_t_minus1",
+         dep_var_type == "inflation",
+         spec == "baseline")
+
+irf_infl_gamma$sample <- factor(irf_infl_gamma$sample,
+                                levels = c("full", "developed", "emerging"),
+                                labels = c("Full Sample", "Developed", "Emerging"))
+
+ggplot(irf_infl_gamma, aes(x = horizon, y = estimate)) +
+  geom_ribbon(aes(ymin = ci_lower_95, ymax = ci_upper_95),
+              fill = "#2C7FB8", alpha = 0.15) +
+  geom_ribbon(aes(ymin = ci_lower_90, ymax = ci_upper_90),
+              fill = "#2C7FB8", alpha = 0.25) +
+  geom_line(color = "#2C7FB8", linewidth = 0.8) +
+  geom_point(color = "#2C7FB8", size = 2.5) +
+  geom_text(aes(label = round(estimate, 3)), nudge_y = 0.25, size = 3.5, family = "serif") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  facet_wrap(~ sample, ncol = 3) +
+  scale_x_continuous(breaks = 0:max_horizon) +
+  labs(
+    title = "Impulse Response: Direct Effect of Informality (MIMIC) on Inflation",
+    subtitle = expression(paste(gamma[h], " (coefficient on MIMIC) from the baseline LP specification")),
+    x = "Horizon (years)",
+    y = expression(hat(gamma)[h]),
+    caption = "Shaded areas: 90% (dark) and 95% (light) confidence intervals. Country-clustered SEs."
+  ) +
+  theme_minimal(base_size = 12, base_family = "serif") +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10, color = "grey30")
+  )
+
+```
+
+
+```{r}
+#| label: IRF Plots — PART B Log GDP p.c. MIMIC Direct Effect (γ_h)
+#| output: true
+#| fig-width: 12
+#| fig-height: 5
+
+# ══════════════════════════════════════════════════════════════════════════════
+# IRF — DIRECT EFFECT OF MIMIC ON LOG GDP PER CAPITA (γ_h)
+# ══════════════════════════════════════════════════════════════════════════════
+# γ_h captures the direct association between lagged informality (MIMIC_{t-1})
+# and log GDP per capita, holding MPS and the interaction constant.
+#
+#   γ_h > 0 → higher informality is associated with higher output (unusual)
+#   γ_h < 0 → higher informality is associated with lower output
+#              (consistent with the "informality as productivity drag" view)
+#
+# CAVEAT: Same as Part A — MIMIC is 99.6% between-country (Diagnostic 3), so
+# country FE absorb most of its variation. γ_h is expected to be imprecise;
+# the interaction δ_h is the core parameter.
+# ══════════════════════════════════════════════════════════════════════════════
+
+irf_lgdp_gamma <- lp_all %>%
+  filter(variable == "mimic_t_minus1",
+         dep_var_type == "lgdp_pc",
+         spec == "baseline")
+
+irf_lgdp_gamma$sample <- factor(irf_lgdp_gamma$sample,
+                                levels = c("full", "developed", "emerging"),
+                                labels = c("Full Sample", "Developed", "Emerging"))
+
+ggplot(irf_lgdp_gamma, aes(x = horizon, y = estimate)) +
+  geom_ribbon(aes(ymin = ci_lower_95, ymax = ci_upper_95),
+              fill = "#D95F02", alpha = 0.15) +
+  geom_ribbon(aes(ymin = ci_lower_90, ymax = ci_upper_90),
+              fill = "#D95F02", alpha = 0.25) +
+  geom_line(color = "#D95F02", linewidth = 0.8) +
+  geom_point(color = "#D95F02", size = 2.5) +
+  geom_text(aes(label = round(estimate, 3)), nudge_y = 0.009, size = 3.5, family = "serif") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  facet_wrap(~ sample, ncol = 3) +
+  scale_x_continuous(breaks = 0:max_horizon) +
+  labs(
+    title = "Impulse Response: Direct Effect of Informality (MIMIC) on Log GDP per Capita",
+    subtitle = expression(paste(gamma[h], " (coefficient on MIMIC) from the baseline LP specification")),
+    x = "Horizon (years)",
+    y = expression(hat(gamma)[h]),
+    caption = "Shaded areas: 90% (dark) and 95% (light) confidence intervals. Country-clustered SEs."
+  ) +
+  theme_minimal(base_size = 12, base_family = "serif") +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10, color = "grey30")
+  )
+
+```
+
+
+```{r}
+#| label: IRF Plots — PART C GDP Growth MIMIC Direct Effect (γ_h)
+#| output: true
+#| fig-width: 12
+#| fig-height: 5
+
+# ══════════════════════════════════════════════════════════════════════════════
+# IRF — DIRECT EFFECT OF MIMIC ON GDP GROWTH (γ_h) — SIDELINE
+# ══════════════════════════════════════════════════════════════════════════════
+# γ_h captures the direct association between lagged informality (MIMIC_{t-1})
+# and the GDP growth rate, holding MPS and the interaction constant.
+#
+#   γ_h > 0 → higher informality is associated with faster growth
+#   γ_h < 0 → higher informality is associated with slower growth
+#
+# CAVEAT: Same as Parts A and B — γ_h is expected to be imprecise because
+# country FE absorb the overwhelmingly between-country variation in MIMIC.
+# ══════════════════════════════════════════════════════════════════════════════
+
+irf_gdpgr_gamma <- lp_all %>%
+  filter(variable == "mimic_t_minus1",
+         dep_var_type == "gdp_growth",
+         spec == "baseline")
+
+irf_gdpgr_gamma$sample <- factor(irf_gdpgr_gamma$sample,
+                                 levels = c("full", "developed", "emerging"),
+                                 labels = c("Full Sample", "Developed", "Emerging"))
+
+ggplot(irf_gdpgr_gamma, aes(x = horizon, y = estimate)) +
+  geom_ribbon(aes(ymin = ci_lower_95, ymax = ci_upper_95),
+              fill = "#66A61E", alpha = 0.15) +
+  geom_ribbon(aes(ymin = ci_lower_90, ymax = ci_upper_90),
+              fill = "#66A61E", alpha = 0.25) +
+  geom_line(color = "#66A61E", linewidth = 0.8) +
+  geom_point(color = "#66A61E", size = 2.5) +
+  geom_text(aes(label = round(estimate, 3)), nudge_y = 0.23, size = 3.5, family = "serif") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  facet_wrap(~ sample, ncol = 3) +
+  scale_x_continuous(breaks = 0:max_horizon) +
+  labs(
+    title = "Impulse Response: Direct Effect of Informality (MIMIC) on GDP Growth (Sideline)",
+    subtitle = expression(paste(gamma[h], " (coefficient on MIMIC) from the baseline LP specification")),
+    x = "Horizon (years)",
+    y = expression(hat(gamma)[h]),
+    caption = "Shaded areas: 90% (dark) and 95% (light) confidence intervals. Country-clustered SEs."
+  ) +
+  theme_minimal(base_size = 12, base_family = "serif") +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10, color = "grey30")
+  )
+
+```
+
+
+```{r}
+#| label: IRF Plots — All Coefficients Summary Table (Full Sample)
+#| output: true
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SUMMARY TABLE — ALL BASELINE COEFFICIENTS ACROSS HORIZONS
+# ══════════════════════════════════════════════════════════════════════════════
+# Full regression output for the baseline spec, not just the interaction.
+# Useful for the paper's appendix or results tables.
+# ══════════════════════════════════════════════════════════════════════════════
+
+cat("══════════════════════════════════════════════════════════════════\n")
+cat("  FULL COEFFICIENT TABLE — BASELINE SPECIFICATION (Full Sample)\n")
+cat("══════════════════════════════════════════════════════════════════\n")
+
+cat("\n── Inflation model ──\n")
+lp_all %>%
+  filter(spec == "baseline", sample == "full", dep_var_type == "inflation") %>%
+  select(variable, horizon, estimate, std_error, p_value) %>%
+  mutate(estimate = round(estimate, 4),
+         std_error = round(std_error, 4),
+         p_value = round(p_value, 3),
+         sig = case_when(p_value < 0.01 ~ "***",
+                         p_value < 0.05 ~ "**",
+                         p_value < 0.10 ~ "*",
+                         TRUE ~ "")) %>%
+  as.data.frame() %>%
+  print(row.names = FALSE)
+
+cat("\n── Log GDP p.c. model ──\n")
+lp_all %>%
+  filter(spec == "baseline", sample == "full", dep_var_type == "lgdp_pc") %>%
+  select(variable, horizon, estimate, std_error, p_value) %>%
+  mutate(estimate = round(estimate, 4),
+         std_error = round(std_error, 4),
+         p_value = round(p_value, 3),
+         sig = case_when(p_value < 0.01 ~ "***",
+                         p_value < 0.05 ~ "**",
+                         p_value < 0.10 ~ "*",
+                         TRUE ~ "")) %>%
+  as.data.frame() %>%
+  print(row.names = FALSE)
+
+cat("\n── GDP growth model ──\n")
+lp_all %>%
+  filter(spec == "baseline", sample == "full", dep_var_type == "gdp_growth") %>%
+  select(variable, horizon, estimate, std_error, p_value) %>%
+  mutate(estimate = round(estimate, 4),
+         std_error = round(std_error, 4),
+         p_value = round(p_value, 3),
+         sig = case_when(p_value < 0.01 ~ "***",
+                         p_value < 0.05 ~ "**",
+                         p_value < 0.10 ~ "*",
+                         TRUE ~ "")) %>%
+  as.data.frame() %>%
+  print(row.names = FALSE)
+
+```
+
+```{r}
+#| label: IRF Plots — All Coefficients Summary Table (Developed)
+#| output: true
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SUMMARY TABLE — ALL BASELINE COEFFICIENTS ACROSS HORIZONS
+# ══════════════════════════════════════════════════════════════════════════════
+# Full regression output for the baseline spec, not just the interaction.
+# Useful for the paper's appendix or results tables.
+# ══════════════════════════════════════════════════════════════════════════════
+
+cat("══════════════════════════════════════════════════════════════════\n")
+cat("  FULL COEFFICIENT TABLE — BASELINE SPECIFICATION (Developed)\n")
+cat("══════════════════════════════════════════════════════════════════\n")
+
+cat("\n── Inflation model ──\n")
+lp_all %>%
+  filter(spec == "baseline", sample == "developed", dep_var_type == "inflation") %>%
+  select(variable, horizon, estimate, std_error, p_value) %>%
+  mutate(estimate = round(estimate, 4),
+         std_error = round(std_error, 4),
+         p_value = round(p_value, 3),
+         sig = case_when(p_value < 0.01 ~ "***",
+                         p_value < 0.05 ~ "**",
+                         p_value < 0.10 ~ "*",
+                         TRUE ~ "")) %>%
+  as.data.frame() %>%
+  print(row.names = FALSE)
+
+cat("\n── Log GDP p.c. model ──\n")
+lp_all %>%
+  filter(spec == "baseline", sample == "developed", dep_var_type == "lgdp_pc") %>%
+  select(variable, horizon, estimate, std_error, p_value) %>%
+  mutate(estimate = round(estimate, 4),
+         std_error = round(std_error, 4),
+         p_value = round(p_value, 3),
+         sig = case_when(p_value < 0.01 ~ "***",
+                         p_value < 0.05 ~ "**",
+                         p_value < 0.10 ~ "*",
+                         TRUE ~ "")) %>%
+  as.data.frame() %>%
+  print(row.names = FALSE)
+
+cat("\n── GDP growth model ──\n")
+lp_all %>%
+  filter(spec == "baseline", sample == "developed", dep_var_type == "gdp_growth") %>%
+  select(variable, horizon, estimate, std_error, p_value) %>%
+  mutate(estimate = round(estimate, 4),
+         std_error = round(std_error, 4),
+         p_value = round(p_value, 3),
+         sig = case_when(p_value < 0.01 ~ "***",
+                         p_value < 0.05 ~ "**",
+                         p_value < 0.10 ~ "*",
+                         TRUE ~ "")) %>%
+  as.data.frame() %>%
+  print(row.names = FALSE)
+
+```
+
+```{r}
+#| label: IRF Plots — All Coefficients Summary Table (Emerging)
+#| output: true
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SUMMARY TABLE — ALL BASELINE COEFFICIENTS ACROSS HORIZONS
+# ══════════════════════════════════════════════════════════════════════════════
+# Full regression output for the baseline spec, not just the interaction.
+# Useful for the paper's appendix or results tables.
+# ══════════════════════════════════════════════════════════════════════════════
+
+cat("══════════════════════════════════════════════════════════════════\n")
+cat("  FULL COEFFICIENT TABLE — BASELINE SPECIFICATION (Emerging)\n")
+cat("══════════════════════════════════════════════════════════════════\n")
+
+cat("\n── Inflation model ──\n")
+lp_all %>%
+  filter(spec == "baseline", sample == "emerging", dep_var_type == "inflation") %>%
+  select(variable, horizon, estimate, std_error, p_value) %>%
+  mutate(estimate = round(estimate, 4),
+         std_error = round(std_error, 4),
+         p_value = round(p_value, 3),
+         sig = case_when(p_value < 0.01 ~ "***",
+                         p_value < 0.05 ~ "**",
+                         p_value < 0.10 ~ "*",
+                         TRUE ~ "")) %>%
+  as.data.frame() %>%
+  print(row.names = FALSE)
+
+cat("\n── Log GDP p.c. model ──\n")
+lp_all %>%
+  filter(spec == "baseline", sample == "emerging", dep_var_type == "lgdp_pc") %>%
+  select(variable, horizon, estimate, std_error, p_value) %>%
+  mutate(estimate = round(estimate, 4),
+         std_error = round(std_error, 4),
+         p_value = round(p_value, 3),
+         sig = case_when(p_value < 0.01 ~ "***",
+                         p_value < 0.05 ~ "**",
+                         p_value < 0.10 ~ "*",
+                         TRUE ~ "")) %>%
+  as.data.frame() %>%
+  print(row.names = FALSE)
+
+cat("\n── GDP growth model ──\n")
+lp_all %>%
+  filter(spec == "baseline", sample == "emerging", dep_var_type == "gdp_growth") %>%
+  select(variable, horizon, estimate, std_error, p_value) %>%
+  mutate(estimate = round(estimate, 4),
+         std_error = round(std_error, 4),
+         p_value = round(p_value, 3),
+         sig = case_when(p_value < 0.01 ~ "***",
+                         p_value < 0.05 ~ "**",
+                         p_value < 0.10 ~ "*",
+                         TRUE ~ "")) %>%
+  as.data.frame() %>%
+  print(row.names = FALSE)
+
+```
