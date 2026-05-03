@@ -98,7 +98,7 @@ where δₕ is the coefficient of economic interest, country and year fixed effe
 ```
 .
 ├── README.md
-├── CITATION.CFF
+├── CITATION.cff
 ├── Meshkovski_Nikola_Formal_Shocks_Informal_Buffers_2026.pdf   ← paper
 ├── .gitignore
 │
@@ -140,31 +140,66 @@ The `.qmd` uses `xelatex` because the paper is set in Times New Roman; if you do
 
 ### Step-by-Step
 
+Each step below is tagged with the shell it should be run in: 🖥️ **Terminal** (bash / zsh / PowerShell) or 📊 **R / RStudio console**.
+
+#### 1. 🖥️ Terminal — Clone the repository
+
 ```bash
-# 1. Clone
 git clone https://github.com/nmeskovski/informality-monetary-transmission.git
 cd informality-monetary-transmission/replication
+```
 
-# 2. (One-time) Install LaTeX if you don't have it
+All remaining steps assume the working directory is `replication/`.
+
+#### 2. 🖥️ Terminal — Install LaTeX (one-time setup, skip if you already have it)
+
+```bash
 quarto install tinytex
+```
 
-# 3. Bootstrap the R package environment from renv.lock
-#    This downloads and installs every package at the exact version used.
-Rscript -e 'if (!requireNamespace("renv", quietly = TRUE)) install.packages("renv"); renv::restore()'
+#### 3. Restore the R package environment
 
-# 4. Render the Quarto document
+This downloads and installs every R package at the exact version pinned in `renv.lock`. Pick **one** of the two options below — they do the same thing.
+
+**Option A — 📊 R / RStudio console** *(recommended if you use RStudio)*
+
+Open `replication/` in RStudio (or launch R from inside the `replication/` directory), then run:
+
+```r
+if (!requireNamespace("renv", quietly = TRUE)) install.packages("renv")
+renv::restore()
+```
+
+When `renv::restore()` lists the packages it will install, type `y` to confirm.
+
+**Option B — 🖥️ Terminal** *(no need to open R)*
+
+```bash
+Rscript -e 'if (!requireNamespace("renv", quietly = TRUE)) install.packages("renv"); renv::restore(prompt = FALSE)'
+```
+
+#### 4. Render the Quarto document
+
+**Option A — 🖥️ Terminal**
+
+```bash
 quarto render Project3_Nikola.qmd
 ```
+
+**Option B — 📊 RStudio**
+
+Open `Project3_Nikola.qmd` in RStudio and click the **Render** button in the editor toolbar (or press `Ctrl/Cmd + Shift + K`).
 
 ### What to Expect
 
 - **First render takes 5–15 minutes** depending on machine speed. The panel local projections estimate 6 horizons × 2 dependent variables × 3 sub-samples × multiple specifications. Chunk caching is on by default (`cache: true` in the YAML), so subsequent renders only re-run chunks that changed.
-- **To reset the cache** after changing data or specifications:
+- **To reset the cache** after changing data or specifications, run in 🖥️ Terminal from inside `replication/`:
   ```bash
-  rm -rf Project3_Nikola_cache_freeze
+  rm -rf Project3_Nikola_cache _freeze
   ```
+  (Two paths separated by a space — the chunk cache directory and the Quarto freeze directory.)
 - **If `renv::restore()` fails** on a single package, the most common cause is a missing system library (e.g., `libxml2-dev`, `libssl-dev`, `libgit2-dev` on Debian/Ubuntu; `pkg-config` on macOS). Install the system dependency and re-run `renv::restore()`.
-- **If the LaTeX step fails**, run `quarto install tinytex --update` and let TinyTeX auto-install missing packages on the next render.
+- **If the LaTeX step fails** with a missing package, run `quarto install tinytex --update` in 🖥️ Terminal and let TinyTeX auto-install missing packages on the next render.
 
 ### Outputs
 
@@ -234,4 +269,3 @@ BSc Project 3 Portfolio Thesis in Corvinus University of Budapest. Code is inten
 
 For questions about reproducing the results.
 Nikola Meshkovski · nmeskovski@gmail.com
-
