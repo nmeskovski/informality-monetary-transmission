@@ -1,0 +1,53 @@
+cff-version: 1.2.0
+message: >
+  If you use this replication package or build on the analysis,
+  please cite the underlying BSc project (see preferred-citation below).
+title: >
+  Replication package for "Formal Shocks, Informal Buffers: Identifying
+  the Conditional Transmission of Monetary Policy Through Panel Local
+  Projections, 2000–2019"
+authors:
+  - family-names: Meshkovski
+    given-names: Nikola
+    affiliation: Corvinus University of Budapest
+type: software
+repository-code: "https://github.com/nmeskovski/informality-monetary-transmission"
+url: "https://github.com/nmeskovski/informality-monetary-transmission"
+abstract: >
+  Replication code and data for a panel local-projection analysis
+  testing whether the size of the informal economy moderates
+  monetary-policy transmission to inflation and real output across
+  122 countries over 2000–2019. Combines identified monetary-policy
+  shocks (Choi, Willems & Yoo, 2024) with MIMIC-based informality
+  estimates (Medina & Schneider, 2018), with separate estimation for
+  developed economies and EMDEs.
+keywords:
+  - monetary policy
+  - informal economy
+  - local projections
+  - panel data
+  - emerging markets
+  - macroeconomics
+  - reproducibility
+  - R
+  - Quarto
+date-released: 2026-02-26
+version: "1.0.0"
+
+preferred-citation:
+  type: thesis
+  thesis-type: "BSc project (Project 3, BSc Applied Economics portfolio)"
+  title: >
+    Formal Shocks, Informal Buffers: Identifying the Conditional
+    Transmission of Monetary Policy Through Panel Local Projections,
+    2000–2019
+  authors:
+    - family-names: Meshkovski
+      given-names: Nikola
+      affiliation: Corvinus University of Budapest
+  year: 2026
+  month: 2
+  institution:
+    name: "Corvinus University of Budapest, Institute of Economics"
+    city: Budapest
+    country: HU
