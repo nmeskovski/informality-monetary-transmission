@@ -9,7 +9,7 @@ Instructor: Ahmet Benlialper
 
 ## Overview
 
-This repository contains the paper and the full replication package for *Formal Shocks, Informal Buffers*. The project tests whether the size of the informal economy moderates monetary-policy transmission to inflation and real activity. It combines the identified monetary-policy shocks of Choi, Willems, and Yoo (2024) with the MIMIC-based informality estimates of Medina and Schneider (2018) and applies a panel local-projection (LP) framework to 122 countries over 2000–2019, with separate estimation for developed economies and EMDEs.
+This repository contains the paper and the full replication package for *Formal Shocks, Informal Buffers*. The project tests whether the size of the informal economy moderates monetary-policy transmission to inflation and real output. It combines the identified monetary-policy shocks of Choi, Willems, and Yoo (2024) with the MIMIC-based informality estimates of Medina and Schneider (2018) and applies a panel local-projection (LP) framework to 122 countries over 2000–2019, with separate estimation for developed economies and EMDEs.
 
 Headline contributions:
 
@@ -88,7 +88,7 @@ Rscript -e 'install.packages("renv"); renv::restore()'
 quarto render Project3_Nikola.qmd
 ```
 
-The first render takes several minutes — the panel local projections estimate 12 horizons across three dependent variables and multiple sub-samples, and chunk caching is on by default. Subsequent renders are much faster. If you change the data or specifications, set `cache: false` in the YAML header (or delete the `_freeze/` and `Project3_Nikola_cache/` directories) before rendering.
+The first render takes several minutes — the panel local projections estimate 12 horizons across three dependent variables and multiple sub-samples, and chunk caching is on by default. Subsequent renders are much faster. If you change the data or specifications, set `cache: false` in the YAML header (or delete the `_freeze/` directories) before rendering.
 
 ### What gets produced
 
