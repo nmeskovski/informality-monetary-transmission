@@ -151,7 +151,7 @@ cd informality-monetary-transmission/replication
 
 All remaining steps assume the working directory is `replication/`.
 
-#### 2. 🖥️ Terminal — Install LaTeX (one-time setup, skip if you already have it)
+#### 2. Terminal — Install LaTeX (one-time setup, skip if you already have it)
 
 ```bash
 quarto install tinytex
@@ -161,7 +161,7 @@ quarto install tinytex
 
 This downloads and installs every R package at the exact version pinned in `renv.lock`. Pick **one** of the two options below — they do the same thing.
 
-**Option A — 📊 R / RStudio console** *(recommended if you use RStudio)*
+**Option A — R / RStudio console** *(recommended if you use RStudio)*
 
 Open `replication/` in RStudio (or launch R from inside the `replication/` directory), then run:
 
@@ -172,7 +172,7 @@ renv::restore()
 
 When `renv::restore()` lists the packages it will install, type `y` to confirm.
 
-**Option B — 🖥️ Terminal** *(no need to open R)*
+**Option B — Terminal** *(no need to open R)*
 
 ```bash
 Rscript -e 'if (!requireNamespace("renv", quietly = TRUE)) install.packages("renv"); renv::restore(prompt = FALSE)'
@@ -180,7 +180,7 @@ Rscript -e 'if (!requireNamespace("renv", quietly = TRUE)) install.packages("ren
 
 #### 4. Render the Quarto document
 
-**Option A — 🖥️ Terminal**
+**Option A — Terminal**
 
 ```bash
 quarto render Project3_Nikola.qmd
@@ -193,13 +193,13 @@ Open `Project3_Nikola.qmd` in RStudio and click the **Render** button in the edi
 ### What to Expect
 
 - **First render takes 5–15 minutes** depending on machine speed. The panel local projections estimate 6 horizons × 2 dependent variables × 3 sub-samples × multiple specifications. Chunk caching is on by default (`cache: true` in the YAML), so subsequent renders only re-run chunks that changed.
-- **To reset the cache** after changing data or specifications, run in 🖥️ Terminal from inside `replication/`:
+- **To reset the cache** after changing data or specifications, run in Terminal from inside `replication/`:
   ```bash
   rm -rf Project3_Nikola_cache _freeze
   ```
   (Two paths separated by a space — the chunk cache directory and the Quarto freeze directory.)
 - **If `renv::restore()` fails** on a single package, the most common cause is a missing system library (e.g., `libxml2-dev`, `libssl-dev`, `libgit2-dev` on Debian/Ubuntu; `pkg-config` on macOS). Install the system dependency and re-run `renv::restore()`.
-- **If the LaTeX step fails** with a missing package, run `quarto install tinytex --update` in 🖥️ Terminal and let TinyTeX auto-install missing packages on the next render.
+- **If the LaTeX step fails** with a missing package, run `quarto install tinytex --update` in Terminal and let TinyTeX auto-install missing packages on the next render.
 
 ### Outputs
 
@@ -252,8 +252,6 @@ In line with Provision 6/2025 of the Corvinus Vice-Rector for Academic Programme
 - Medina, L., & Schneider, F. (2018). Shadow economies around the world: What did we learn over the last 20 years? (IMF Working Paper No. 18/17).
 - Restrepo-Echavarría, P. (2014). Macroeconomic volatility: The role of the informal economy. *European Economic Review*, 70, 454–469.
 - Rusnák, M., Havranek, T., & Horváth, R. (2013). How to solve the price puzzle? A meta-analysis. *Journal of Money, Credit and Banking*, 45(1), 37–70.
-  
-...
 
 The full reference list is available in §7 of the paper.
 
