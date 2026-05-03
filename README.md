@@ -3,8 +3,8 @@
 > **BSc Applied Economics** · Corvinus University of Budapest · 2026
 > **Course:** Project 3 · **Instructor:** Benlialper Ahmet
 
-📄 **Paper:** [`Meshkovski_Nikola_Formal_Shocks_Informal_Buffers_2026.pdf`](Meshkovski_Nikola_Formal_Shocks_Informal_Buffers_2026.pdf)
-📦 **Replication package:** [`replication/`](replication/)
+ **Paper:** [`Meshkovski_Nikola_Formal_Shocks_Informal_Buffers_2026.pdf`](Meshkovski_Nikola_Formal_Shocks_Informal_Buffers_2026.pdf)
+ **Replication package:** [`replication/`](replication/)
 
 ---
 
@@ -72,10 +72,10 @@ Two testable predictions follow from the dual-sector buffer mechanisms of Castil
 
 ## Methodology
 
-1. **Panel Local Projections** (Jordà, 2005) — one regression per horizon h = 0, …, 5, robust to short-run autoregressive misspecification and transparent in the inclusion of two-way fixed effects
-2. **Interaction design** — MPS × MIMIC interaction recovers the moderating coefficient δₕ; identification exploits the asymmetry between time-varying MPS (99.6% within-country) and structurally slow MIMIC (99.6% between-country), so the interaction term is well-identified even after country fixed effects absorb MIMIC levels
-3. **Inference** — country-clustered standard errors (Cameron, Gelbach & Miller, 2011) accommodating heteroskedasticity and the mechanical serial correlation of LP cumulative outcomes
-4. **Robustness** — alternative governance specifications (each of the four raw WGI indicators in turn); re-inclusion of Turkey (the most-affected winsorised country); results are visually and quantitatively unchanged
+1. **Panel Local Projections** (Jordà, 2005) — one regression per horizon h = 0, …, 5, robust to short-run autoregressive misspecification and transparent in the inclusion of two-way fixed effects.
+2. **Interaction design** — MPS × MIMIC interaction recovers the moderating coefficient δₕ; identification exploits the asymmetry between time-varying MPS (99.6% within-country) and structurally slow MIMIC (99.6% between-country), so the interaction term is well-identified even after country fixed effects absorb MIMIC levels.
+3. **Inference** — country-clustered standard errors (Cameron, Gelbach & Miller, 2011), accommodating heteroskedasticity and the mechanical serial correlation of LP cumulative outcomes.
+4. **Robustness** — alternative governance specifications (each of the four raw WGI indicators in turn); re-inclusion of Turkey (the most-affected winsorised country); results are visually and quantitatively unchanged.
 
 **Main Specification:**
 
@@ -87,8 +87,8 @@ where δₕ is the coefficient of economic interest, country and year fixed effe
 
 ## Three Contributions
 
-1. **Identified shocks** — large-panel test using the Choi–Willems–Yoo (2024) shock series rather than Taylor-rule residuals or raw policy-rate changes, addressing longstanding EMDE measurement concerns.
-2. **Separate margins** — inflation and real-output responses are treated and interpreted distinctly; they respond through different mechanisms, and conflating them obscures the buffer channel.
+1. **Identified shocks** — large-panel test using the Choi–Willems–Yoo (2024) shock series rather than Taylor-rule residuals or raw policy-rate changes, addressing longstanding EMDE measurement concerns. 
+2. **Separate margins** — inflation and real-output responses are treated and interpreted distinctly; they respond through different mechanisms, and conflating them obscures the buffer channel. 
 3. **Threshold evidence** — informality's moderating role is concentrated in emerging economies, supporting a non-linear threshold interpretation and challenging advanced-economy-grounded inference in cross-country transmission work.
 
 ---
@@ -98,6 +98,7 @@ where δₕ is the coefficient of economic interest, country and year fixed effe
 ```
 .
 ├── README.md
+├── CITATION.CFF
 ├── Meshkovski_Nikola_Formal_Shocks_Informal_Buffers_2026.pdf   ← paper
 ├── .gitignore
 │
@@ -160,7 +161,7 @@ quarto render Project3_Nikola.qmd
 - **First render takes 5–15 minutes** depending on machine speed. The panel local projections estimate 6 horizons × 2 dependent variables × 3 sub-samples × multiple specifications. Chunk caching is on by default (`cache: true` in the YAML), so subsequent renders only re-run chunks that changed.
 - **To reset the cache** after changing data or specifications:
   ```bash
-  rm -rf Project3_Nikola_cache _freeze
+  rm -rf Project3_Nikola_cache_freeze
   ```
 - **If `renv::restore()` fails** on a single package, the most common cause is a missing system library (e.g., `libxml2-dev`, `libssl-dev`, `libgit2-dev` on Debian/Ubuntu; `pkg-config` on macOS). Install the system dependency and re-run `renv::restore()`.
 - **If the LaTeX step fails**, run `quarto install tinytex --update` and let TinyTeX auto-install missing packages on the next render.
@@ -216,18 +217,21 @@ In line with Provision 6/2025 of the Corvinus Vice-Rector for Academic Programme
 - Medina, L., & Schneider, F. (2018). Shadow economies around the world: What did we learn over the last 20 years? (IMF Working Paper No. 18/17).
 - Restrepo-Echavarría, P. (2014). Macroeconomic volatility: The role of the informal economy. *European Economic Review*, 70, 454–469.
 - Rusnák, M., Havranek, T., & Horváth, R. (2013). How to solve the price puzzle? A meta-analysis. *Journal of Money, Credit and Banking*, 45(1), 37–70.
+  
+...
 
-Full reference list is available in §7 of the paper.
+The full reference list is available in §7 of the paper.
 
 ---
 
 ## License
 
-To be added. Code is intended for academic use; the raw data files retain the licenses of their original providers and are included here strictly for replication. Please consult the source organisations (World Bank, IMF, Freedom House, TheGlobalEconomy.com, Choi–Willems–Yoo) before redistributing them.
+BSc Project 3 Portfolio Thesis in Corvinus University of Budapest. Code is intended for academic use; the raw data files retain the licenses of their original providers and are included here strictly for replication. Please consult the source organisations (World Bank, IMF, Freedom House, TheGlobalEconomy.com, Choi–Willems–Yoo) before redistributing them officially.
 
 ---
 
 ## Contact
 
-Nikola Meshkovski · Corvinus University of Budapest · BSc Applied Economics
-For questions about reproducing the results, please open an issue on this repository.
+For questions about reproducing the results.
+Nikola Meshkovski · nmeskovski@gmail.com
+
