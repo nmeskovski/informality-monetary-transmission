@@ -10,7 +10,7 @@
 
 ## Abstract
 
-This paper tests whether the size of a country's informal economy moderates the transmission of identified monetary policy shocks to inflation and real output. Using panel local projections across **122 countries over 2000–2019**, and interacting the Choi–Willems–Yoo (2024) shock series with the Medina–Schneider (2018) MIMIC informality measure, the study finds that a larger informal sector significantly dampens both the inflation response and the anomalous positive output response to a contractionary shock — effects concentrated in emerging economies and statistically undetectable in advanced ones.
+ This paper tests whether informality moderates monetary policy transmission using panel LP across **122 countries** over **2000-2019**, interacting the Choi-Willems-Yoo (2024) shock series with the Medina-Schneider (2018) MIMIC measure. A larger informal sector significantly dampens the inflation response at impact and one-year horizons (δ1 = 0.061, p = 0.015), implying a **~1.1 pp difference** between a typical developed and emerging economy, and attenuates the puzzle-consistent positive output response toward zero (δ0 = -0.0003, p = 0.001 in emerging economies). Both effects are concentrated in emerging markets and undetectable in developed ones.
 
 ---
 
